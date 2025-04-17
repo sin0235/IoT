@@ -13,6 +13,10 @@
 #define PIN_LCD_SDA  A4
 #define PIN_LCD_SCL  A5
 #define PCF8574_ADDR 0x20               // I2C address for PCF8574 keypad module
+#define BEEP_FREQ    1000 // 1 kHz
+#define SHORT_BEEP   150  // ms cho bíp ngắn
+#define SHORT_PAUSE  100// ms giữa các bíp
+#define LONG_BEEP    500 // ms cho bíp dài cuối cùng
 
 // Fingerprint sensor AS608
 #define PIN_FINGER_RX 2                 // Arduino RX (connects to AS608 TX)
@@ -33,7 +37,7 @@
 #define ADMIN_PIN_EEPROM_ADDR 100       // Admin PIN address
 
 // Timing constants
-#define DOOR_OPEN_DURATION 10000         // Door stays open for 10 seconds
+#define DOOR_OPEN_DURATION 7000         // Door stays open for 7 seconds
 #define LOCKOUT_DURATION 30000          // 30 seconds lockout after failed attempts
 #define TIMEOUT_DURATION 10000          // 10 seconds timeout for operations
 #define SHORT_DELAY 500                 // Short delay for UI feedback
@@ -150,6 +154,8 @@ void handleDeleteUser();
 void handleChangeAdminPIN();
 void showAuthResult(bool success, const char* method);
 void showMenuPrompt(const char* title, const char* prompt);
+  unsigned long lastKeyPressTime = 0;
+  uint8_t lastKeyCode = 0;
 
 /*********************** SETUP **************************/
 void setup() {
@@ -282,23 +288,40 @@ void loop() {
 /*********************** INPUT PROCESSING **************************/
 void processUserInput() {
   uint8_t keyCode = keypad.getKey();
-  
-  // Only process valid key presses
+  unsigned long currentTime = millis();
+    lastKeyPressTime = 0;
+  lastKeyCode = 0;
+  // Chỉ xử lý khi phím hợp lệ được nhấn (không phải 0 hoặc 16)
   if (keyCode != 0 && keyCode != 16) {
-    char key = mapKeypadCodeToChar(keyCode);
-    
-    if (key != 0) {
-      Serial.print(F("Key pressed: "));
-      Serial.println(key);
+    // Kiểm tra chống dính phím
+    if ((keyCode != lastKeyCode) || (currentTime - lastKeyPressTime >= DEBOUNCE_DELAY)) {
+      char key = mapKeypadCodeToChar(keyCode);
       
-      // Process key based on current state
-      if (currentState == STATE_IDLE) {
-        handleIdleStateInput(key);
-      } else if (currentState == STATE_PIN_ENTRY) {
-        handlePinEntry(key);
+      if (key != 0) {
+        Serial.print(F("Key pressed: "));
+        Serial.println(key);
+        
+        // Cập nhật thời gian nhấn phím và giá trị phím
+        lastKeyCode = keyCode;
+        lastKeyPressTime = currentTime;
+        
+        // Xử lý phím dựa trên trạng thái hiện tại
+        if (currentState == STATE_IDLE) {
+          handleIdleStateInput(key);
+        } else if (currentState == STATE_PIN_ENTRY) {
+          handlePinEntry(key);
+        }
       }
     }
+  } else {
+    // Reset lastKeyCode nếu không có phím nào được nhấn trong một khoảng thời gian
+    if (currentTime - lastKeyPressTime > DEBOUNCE_DELAY * 2) {
+      lastKeyCode = 0;
+    }
   }
+  
+  // Thêm độ trễ nhỏ để giảm tải cho CPU
+  delay(10);
 }
 
 void handleIdleStateInput(char key) {
@@ -385,6 +408,24 @@ void activateLockout() {
   tone(PIN_BUZZER, 2000);
   Serial.println(F("ALERT:AUTH_FAIL_MAX"));
   delay(LONG_DELAY);
+  noTone(PIN_BUZZER);
+  beepWarning();
+}
+
+
+
+// Hàm cảnh báo bằng buzzer
+// times: số lần bíp ngắn trước khi bíp dài
+void beepWarning() {
+  for (uint8_t i = 0; i < 5; i++) {
+    tone(PIN_BUZZER, BEEP_FREQ);
+    delay(SHORT_BEEP);
+    noTone(PIN_BUZZER);
+    delay(SHORT_PAUSE);
+  }
+  // Bíp dài kết thúc
+  tone(PIN_BUZZER, BEEP_FREQ);
+  delay(LONG_BEEP);
   noTone(PIN_BUZZER);
 }
 
@@ -487,24 +528,33 @@ void checkDoorButton() {
   }
 }
 
+void beepSuccess() {
+  for (uint8_t i = 0; i < 2; i++) {
+    tone(PIN_BUZZER, BEEP_FREQ);
+    delay(SHORT_BEEP);
+    noTone(PIN_BUZZER);
+    delay(SHORT_PAUSE);
+  }
+}
+
+
 /*********************** DOOR CONTROL **************************/
 void openDoor(const char* method) {
   showAuthResult(true, method);
-  beepOk();
+  beepSuccess();
   
   // Log access event
   Serial.print(F("EVENT:ACCESS_GRANTED via "));
   Serial.println(method);
   doorServo.attach(PIN_SERVO);
   // Unlock door
-  doorServo.write(90);
+  doorServo.write(110);
   digitalWrite(PIN_RELAY, HIGH);
   
   doorOpen = true;
   doorOpenTime = millis();
   failCount = 0;
   currentState = STATE_DOOR_OPEN;
-  
   showIdleScreen();
 }
 
@@ -603,69 +653,97 @@ void beepError() {
 void adminModeMenu() {
   bool exitAdminMenu = false;
   
-  // Show current menu page
+  // Biến cho cơ chế chống dính phím
+  lastKeyPressTime = 0;
+  lastKeyCode = 0;
+  
+  // Hiển thị trang menu hiện tại
   showAdminMenu(adminMenuPage);
   
   while (!exitAdminMenu) {
     uint8_t keyCode = keypad.getKey();
+    unsigned long currentTime = millis();
     
-    // Process valid key presses
+    // Xử lý phím hợp lệ
     if (keyCode != 0 && keyCode != 16) {
-      char key = mapKeypadCodeToChar(keyCode);
-      
-      if (key != 0) {
-        Serial.print(F("Admin key: "));
-        Serial.println(key);
+      // Kiểm tra chống dính phím
+      if ((keyCode != lastKeyCode) || (currentTime - lastKeyPressTime >= DEBOUNCE_DELAY)) {
+        char key = mapKeypadCodeToChar(keyCode);
         
-        // Handle menu navigation and options
-        switch (key) {
-          case '2':
-            handleAddRFIDUser();
-            break;
-          case '3':
-            handleAddPINUser();
-            break;
-          case '4':
-            handleAddFingerprintUser();
-            break;
-          case 'A':
-            handleChangeAdminPIN();
-            break;
-          case 'D':
-            handleDeleteUser();
-            break;
-          case 'B':
-            lcd.clear();
-            lcd.print(F("Listing Users"));
-            lcd.setCursor(0, 1);
-            lcd.print(F("Check Serial"));
-            listUsers();
-            delay(LONG_DELAY);
-            break;
-          case '*':
-            exitAdminMenu = true;
-            currentState = STATE_IDLE;
-            lcd.clear();
-            lcd.print(F("Exit Admin"));
-            delay(MEDIUM_DELAY);
-            showIdleScreen();
-            break;
-          case '#':
-            adminMenuPage = (adminMenuPage + 1) % 3;
+        if (key != 0) {
+          // Cập nhật thời gian nhấn phím và mã phím
+          lastKeyCode = keyCode;
+          lastKeyPressTime = currentTime;
+          
+          Serial.print(F("Admin key: "));
+          Serial.println(key);
+          
+          // Phản hồi âm thanh khi nhấn phím
+          beepOk();
+          
+          // Xử lý điều hướng menu và tùy chọn
+          switch (key) {
+            case '2':
+              handleAddRFIDUser();
+              break;
+            case '3':
+              handleAddPINUser();
+              break;
+            case '4':
+              handleAddFingerprintUser();
+              break;
+            case 'A':
+              handleChangeAdminPIN();
+              break;
+            case 'D':
+              handleDeleteUser();
+              break;
+            case 'B':
+              lcd.clear();
+              lcd.print(F("Listing Users"));
+              lcd.setCursor(0, 1);
+              lcd.print(F("Check Serial"));
+              listUsers();
+              delay(LONG_DELAY);
+              break;
+            case '*':
+              exitAdminMenu = true;
+              currentState = STATE_IDLE;
+              lcd.clear();
+              lcd.print(F("Exit Admin"));
+              delay(MEDIUM_DELAY);
+              showIdleScreen();
+              break;
+            case '#':
+              adminMenuPage = (adminMenuPage + 1) % 3;
+              showAdminMenu(adminMenuPage);
+              break;
+            default:
+              // Phím không hợp lệ trong menu này
+              lcd.clear();
+              lcd.print(F("Invalid option"));
+              delay(800);
+              break;
+          }
+          
+          // Nếu không thoát, làm mới menu
+          if (!exitAdminMenu && key != '#') {
             showAdminMenu(adminMenuPage);
-            break;
+          }
         }
-        
-        // If not exiting, refresh menu
-        if (!exitAdminMenu && key != '#') {
-          showAdminMenu(adminMenuPage);
-        }
+      }
+    } else {
+      // Reset lastKeyCode nếu không có phím nào được nhấn trong một khoảng thời gian
+      if (currentTime - lastKeyPressTime > DEBOUNCE_DELAY * 2) {
+        lastKeyCode = 0;
       }
     }
     
-    // Process remote commands while in admin menu
+    // Xử lý lệnh từ xa trong khi ở menu admin
     processRemoteCommand();
-    delay(50);
+    
+    // Giảm tải CPU
+    delay(25);
   }
 }
 
@@ -760,155 +838,230 @@ void handleAddRFIDUser() {
 void handleAddPINUser() {
   const uint8_t MIN_PIN_LENGTH = 4;
   const uint8_t MAX_PIN_LENGTH = 16;
+lastKeyCode = 0;
+lastKeyPressTime = 0;
+  
+  // Biến theo dõi trạng thái
+  bool inputComplete = false;
+  bool confirmComplete = false;
+  
+  // Biến theo dõi thời gian chống dính phím
+
   
   // Get new PIN
-  lcd.clear();
-  lcd.print(F("Enter new PIN:"));
-  lcd.setCursor(0, 1);
-  lcd.print(F("(4-16 digits)"));
-  delay(100);
-  
   char newPIN[MAX_PIN_LENGTH + 1] = {0};
   char confirmPIN[MAX_PIN_LENGTH + 1] = {0};
   uint8_t pinLength = 0;
   
-  // Get PIN input with visual feedback
-  while (true) {
+  // Hiển thị hướng dẫn ban đầu
+  lcd.clear();
+  lcd.print(F("Enter new PIN:"));
+  lcd.setCursor(0, 1);
+  lcd.print(F("(4-16 digits)"));
+  delay(800); // Thời gian dài hơn để người dùng đọc hướng dẫn
+  
+  lcd.clear();
+  lcd.print(F("Enter new PIN:"));
+  lcd.setCursor(0, 1);
+  
+  // Vòng lặp nhập PIN mới
+  while (!inputComplete) {
     uint8_t kCode = keypad.getKey();
+    unsigned long currentTime = millis();
+    
     if (kCode != 0 && kCode != 16) {
-      char k = mapKeypadCodeToChar(kCode);
-      
-      if (k == '#') {
-        if (pinLength < MIN_PIN_LENGTH) {
-          lcd.clear();
-          lcd.print(F("PIN too short!"));
-          lcd.setCursor(0, 1);
-          lcd.print(F("Min length: "));
-          lcd.print(MIN_PIN_LENGTH);
-          beepError();
-          delay(1000);
-          
-          // Return to PIN entry
-          lcd.clear();
-          lcd.print(F("Enter new PIN:"));
-          lcd.setCursor(0, 1);
-          for (uint8_t i = 0; i < pinLength; i++) {
-            lcd.print('*');
-          }
-          continue;
-        }
-        break;
-      }
-      
-      if (k == '*' && pinLength > 0) {
-        // Backspace functionality
-        pinLength--;
-        newPIN[pinLength] = 0;
+      // Kiểm tra chống dính phím
+      if ((kCode != lastKeyCode) || (currentTime - lastKeyPressTime >= DEBOUNCE_DELAY)) {
+        lastKeyCode = kCode;
+        lastKeyPressTime = currentTime;
         
-        lcd.setCursor(0, 1);
-        lcd.print(F("                ")); // Clear line
-        lcd.setCursor(0, 1);
-        for (uint8_t i = 0; i < pinLength; i++) {
-          lcd.print('*');
+        char k = mapKeypadCodeToChar(kCode);
+        
+        // Xử lý phím Enter (#)
+        if (k == '#') {
+          if (pinLength >= MIN_PIN_LENGTH) {
+            inputComplete = true;
+            beepOk();
+          } else {
+            lcd.clear();
+            lcd.print(F("PIN too short!"));
+            lcd.setCursor(0, 1);
+            lcd.print(F("Min: "));
+            lcd.print(MIN_PIN_LENGTH);
+            lcd.print(F(" digits"));
+            beepError();
+            delay(1200);
+            
+            // Quay lại trạng thái nhập
+            lcd.clear();
+            lcd.print(F("Enter new PIN:"));
+            lcd.setCursor(0, 1);
+            for (uint8_t i = 0; i < pinLength; i++) {
+              lcd.print('*');
+            }
+          }
         }
-        continue;
-      }
-      
-      if ((k >= '0' && k <= '9') || (k >= 'A' && k <= 'D')) {
-        if (pinLength < MAX_PIN_LENGTH) {
-          newPIN[pinLength] = k;
-          newPIN[pinLength + 1] = 0;
-          pinLength++;
+        
+        // Xử lý phím Backspace (*)
+        else if (k == '*' && pinLength > 0) {
+          pinLength--;
+          newPIN[pinLength] = 0;
           
+          // Xóa dòng và hiển thị lại
           lcd.setCursor(0, 1);
-          // Show asterisks for PIN masking
+          lcd.print(F("                ")); // Xóa dòng hoàn toàn
+          lcd.setCursor(0, 1);
           for (uint8_t i = 0; i < pinLength; i++) {
             lcd.print('*');
           }
-        } else {
-          beepError(); // Alert when max length reached
+          beepOk();
+        }
+        
+        // Xử lý phím số
+        else if (k >= '0' && k <= '9') {
+          if (pinLength < MAX_PIN_LENGTH) {
+            newPIN[pinLength] = k;
+            pinLength++;
+            newPIN[pinLength] = 0; // Đảm bảo kết thúc chuỗi
+            
+            lcd.setCursor(pinLength - 1, 1);
+            lcd.print('*');
+            beepOk();
+          } else {
+            lcd.clear();
+            lcd.print(F("PIN too long!"));
+            lcd.setCursor(0, 1);
+            lcd.print(F("Max: "));
+            lcd.print(MAX_PIN_LENGTH);
+            lcd.print(F(" digits"));
+            beepError();
+            delay(1200);
+            
+            // Quay lại trạng thái nhập
+            lcd.clear();
+            lcd.print(F("Enter new PIN:"));
+            lcd.setCursor(0, 1);
+            for (uint8_t i = 0; i < pinLength; i++) {
+              lcd.print('*');
+            }
+          }
         }
       }
     }
-    delay(50);
+    
+    // Reset lastKeyCode nếu không có phím nào được nhấn trong một khoảng thời gian
+    if (kCode == 0 && (currentTime - lastKeyPressTime > DEBOUNCE_DELAY * 2)) {
+      lastKeyCode = 0;
+    }
+    
+    delay(10); // Làm giảm việc quét liên tục
   }
   
-  // Get confirmation with similar UI improvements
+  // Reset biến chống dính phím
+  lastKeyPressTime = 0;
+  lastKeyCode = 0;
+  
+  // Xác nhận lại PIN
   lcd.clear();
   lcd.print(F("Confirm PIN:"));
   lcd.setCursor(0, 1);
   uint8_t confirmLength = 0;
   
-  while (true) {
+  // Vòng lặp xác nhận PIN
+  while (!confirmComplete) {
     uint8_t kCode = keypad.getKey();
+    unsigned long currentTime = millis();
+    
     if (kCode != 0 && kCode != 16) {
-      char k = mapKeypadCodeToChar(kCode);
-      
-      if (k == '#') break;
-      
-      if (k == '*' && confirmLength > 0) {
-        // Backspace functionality
-        confirmLength--;
-        confirmPIN[confirmLength] = 0;
+      // Kiểm tra chống dính phím
+      if ((kCode != lastKeyCode) || (currentTime - lastKeyPressTime >= DEBOUNCE_DELAY)) {
+        lastKeyCode = kCode;
+        lastKeyPressTime = currentTime;
         
-        lcd.setCursor(0, 1);
-        lcd.print(F("                ")); // Clear line
-        lcd.setCursor(0, 1);
-        for (uint8_t i = 0; i < confirmLength; i++) {
-          lcd.print('*');
+        char k = mapKeypadCodeToChar(kCode);
+        
+        // Xử lý phím Enter (#)
+        if (k == '#') {
+          confirmComplete = true;
+          beepOk();
         }
-        continue;
-      }
-      
-      if ((k >= '0' && k <= '9') || (k >= 'A' && k <= 'D')) {
-        if (confirmLength < MAX_PIN_LENGTH) {
-          confirmPIN[confirmLength] = k;
-          confirmPIN[confirmLength + 1] = 0;
-          confirmLength++;
+        
+        // Xử lý phím Backspace (*)
+        else if (k == '*' && confirmLength > 0) {
+          confirmLength--;
+          confirmPIN[confirmLength] = 0;
           
+          // Xóa dòng và hiển thị lại
           lcd.setCursor(0, 1);
-          // Show asterisks for PIN masking
+          lcd.print(F("                ")); // Xóa dòng hoàn toàn
+          lcd.setCursor(0, 1);
           for (uint8_t i = 0; i < confirmLength; i++) {
             lcd.print('*');
           }
-        } else {
-          beepError();
+          beepOk();
+        }
+        
+        // Xử lý phím số
+        else if (k >= '0' && k <= '9') {
+          if (confirmLength < MAX_PIN_LENGTH) {
+            confirmPIN[confirmLength] = k;
+            confirmLength++;
+            confirmPIN[confirmLength] = 0; // Đảm bảo kết thúc chuỗi
+            
+            lcd.setCursor(confirmLength - 1, 1);
+            lcd.print('*');
+            beepOk();
+          } else {
+            beepError();
+          }
         }
       }
     }
-    delay(50);
+    
+    // Reset lastKeyCode nếu không có phím nào được nhấn trong một khoảng thời gian
+    if (kCode == 0 && (currentTime - lastKeyPressTime > DEBOUNCE_DELAY * 2)) {
+      lastKeyCode = 0;
+    }
+    
+    delay(10);
   }
   
-  // Validate and save PIN with improved messaging
-  if (strcmp(newPIN, confirmPIN) == 0 && pinLength >= MIN_PIN_LENGTH) {
-    // Check if PIN already exists
+  // Kiểm tra và lưu PIN
+  lcd.clear();
+  lcd.print(F("Processing..."));
+  
+  if (strcmp(newPIN, confirmPIN) == 0) {
+    // Kiểm tra xem PIN đã tồn tại chưa
     if (!authenticateUser(USER_TYPE_PIN, newPIN)) {
-      // Check EEPROM space before creating user
+      // Kiểm tra không gian EEPROM trước khi tạo người dùng
       if (hasSpaceForNewUser()) {
         UserRecord newUser;
         newUser.active = 1;
         newUser.userType = USER_TYPE_PIN;
         newUser.userID = getUserCount() + 1;
         strncpy(newUser.credential, newPIN, MAX_PIN_LENGTH);
-        newUser.credential[MAX_PIN_LENGTH] = 0; // Ensure null termination
+        newUser.credential[MAX_PIN_LENGTH] = 0; // Đảm bảo kết thúc chuỗi
         
         if (addUserRecord(newUser)) {
           lcd.clear();
-          lcd.print(F("PIN Added"));
+          lcd.print(F("Success!"));
           lcd.setCursor(0, 1);
           lcd.print(F("User ID: "));
           lcd.print(newUser.userID);
+          // Dùng mẫu âm thanh thành công đặc biệt (beep gấp đôi)
+          beepOk();
+          delay(100);
           beepOk();
         } else {
           lcd.clear();
           lcd.print(F("Error saving"));
           lcd.setCursor(0, 1);
-          lcd.print(F("PIN"));
+          lcd.print(F("PIN user"));
           beepError();
         }
       } else {
         lcd.clear();
-        lcd.print(F("EEPROM Full"));
+        lcd.print(F("Memory Full"));
         lcd.setCursor(0, 1);
         lcd.print(F("Delete users first"));
         beepError();
@@ -922,14 +1075,7 @@ void handleAddPINUser() {
     }
   } else {
     lcd.clear();
-    if (strcmp(newPIN, confirmPIN) != 0) {
-      lcd.print(F("PINs don't match"));
-    } else {
-      lcd.print(F("PIN too short"));
-      lcd.setCursor(0, 1);
-      lcd.print(F("Min length: "));
-      lcd.print(MIN_PIN_LENGTH);
-    }
+    lcd.print(F("PINs don't match!"));
     beepError();
   }
   
@@ -943,16 +1089,26 @@ bool hasSpaceForNewUser() {
 
 void handleAddFingerprintUser() {
   lcd.clear();
-
   lcd.print(F("Enter FP ID #:"));
-  delay(100);  
+  delay(200);  
+  
   char idStr[8] = {0};
   uint8_t idLength = 0;
-  
+    lastKeyPressTime = 0;
+  lastKeyCode = 0;
   // Get fingerprint ID number
   while (true) {
     uint8_t kCode = keypad.getKey();
-    if (kCode != 0 && kCode != 16) {
+    unsigned long currentTime = millis();
+    
+    // Process key only if it's different from last key or enough time has passed
+    if (kCode != 0 && kCode != 16 && 
+        (kCode != lastKeyCode || (currentTime - lastKeyPressTime) > DEBOUNCE_DELAY)) {
+      
+      // Update debounce tracking variables
+      lastKeyCode = kCode;
+      lastKeyPressTime = currentTime;
+      
       char k = mapKeypadCodeToChar(kCode);
       
       if (k == '#') break;
@@ -966,7 +1122,7 @@ void handleAddFingerprintUser() {
         lcd.print(idStr);
       }
     }
-    delay(50);
+    delay(10); // Reduced delay for better responsiveness
   }
   
   if (idLength > 0) {
@@ -1014,6 +1170,7 @@ void handleAddFingerprintUser() {
           lcd.setCursor(0, 1);
           lcd.print(F("finger again"));
           
+          success = false; // Reset success flag for second attempt
           p = -1;
           fpStartTime = millis();
           while (millis() - fpStartTime < TIMEOUT_DURATION && p != FINGERPRINT_OK) {
@@ -1102,84 +1259,158 @@ void handleAddFingerprintUser() {
   
   delay(LONG_DELAY);
 }
-
 void handleDeleteUser() {
   lcd.clear();
   lcd.print(F("Del User ID:"));
-    delay(100);
+  lcd.setCursor(0, 1);
+  
+  // Biến cho cơ chế chống dính phím
+lastKeyCode = 0;
+lastKeyPressTime = 0;
+  
   char idStr[8] = {0};
   uint8_t idLength = 0;
   
-  // Get user ID to delete
+  // Vòng lặp nhập ID người dùng cần xóa
   while (true) {
     uint8_t kCode = keypad.getKey();
+    unsigned long currentTime = millis();
+    
     if (kCode != 0 && kCode != 16) {
-      char k = mapKeypadCodeToChar(kCode);
-      
-      if (k == '#') break;
-      
-      if (k >= '0' && k <= '9' && idLength < 7) {
-        idStr[idLength] = k;
-        idStr[idLength+1] = 0;
-        idLength++;
+      // Kiểm tra chống dính phím
+      if ((kCode != lastKeyCode) || (currentTime - lastKeyPressTime >= DEBOUNCE_DELAY)) {
+        char k = mapKeypadCodeToChar(kCode);
         
-        lcd.setCursor(0, 1);
-        lcd.print(idStr);
+        // Cập nhật thời gian nhấn phím và mã phím
+        lastKeyCode = kCode;
+        lastKeyPressTime = currentTime;
+        
+        // Xử lý phím Enter (#)
+        if (k == '#') {
+          beepOk();
+          break;
+        }
+        
+        // Xử lý phím Backspace (*)
+        else if (k == '*' && idLength > 0) {
+          idLength--;
+          idStr[idLength] = 0;
+          
+          // Xóa dòng và hiển thị lại
+          lcd.setCursor(0, 1);
+          lcd.print(F("       ")); // Xóa hiển thị ID
+          lcd.setCursor(0, 1);
+          lcd.print(idStr);
+          beepOk();
+        }
+        
+        // Xử lý phím số
+        else if (k >= '0' && k <= '9' && idLength < 7) {
+          idStr[idLength] = k;
+          idLength++;
+          idStr[idLength] = 0; // Đảm bảo kết thúc chuỗi
+          
+          lcd.setCursor(0, 1);
+          lcd.print(idStr);
+          beepOk();
+        } else if (idLength >= 7) {
+          // ID quá dài
+          beepError();
+        }
+      }
+    } else {
+      // Reset lastKeyCode nếu không có phím nào được nhấn trong một khoảng thời gian
+      if (currentTime - lastKeyPressTime > DEBOUNCE_DELAY * 2) {
+        lastKeyCode = 0;
       }
     }
-    delay(50);
+    
+    delay(20); // Giảm tải CPU
   }
   
+  // Xử lý xóa người dùng
+  lcd.clear();
+  lcd.print(F("Processing..."));
+  
   if (idLength > 0) {
-    uint8_t userID = atoi(idStr);
+    uint16_t userID = atoi(idStr); // Sử dụng uint16_t để hỗ trợ ID lớn hơn
+    
     if (removeUserRecord(userID)) {
       lcd.clear();
-      lcd.print(F("User Removed"));
+      lcd.print(F("User #"));
+      lcd.print(userID);
+      lcd.setCursor(0, 1);
+      lcd.print(F("Removed"));
       beepOk();
+      delay(100);
+      beepOk(); // Âm thanh xác nhận kép cho hành động quan trọng
     } else {
       lcd.clear();
+      lcd.print(F("User #"));
+      lcd.print(userID);
+      lcd.setCursor(0, 1);
       lcd.print(F("Not Found"));
       beepError();
     }
   } else {
     lcd.clear();
     lcd.print(F("No ID entered"));
+    lcd.setCursor(0, 1);
+    lcd.print(F("Operation canceled"));
     beepError();
   }
   
   delay(LONG_DELAY);
 }
-
 void handleChangeAdminPIN() {
   lcd.clear();
   lcd.print(F("New Admin PIN:"));
-  delay(100);
   
   char newAdminPIN[5] = {0};
   uint8_t pinLength = 0;
   
+  // Variables for debouncing
+lastKeyCode = 0;
+  lastKeyPressTime  = 0;
+
+  
   // Get new admin PIN
   while (true) {
     uint8_t kCode = keypad.getKey();
-    if (kCode != 0 && kCode != 16) {
+    unsigned long currentTime = millis();
+    
+    // Process key only if it's different from last key or enough time has passed
+    if (kCode != 0 && (kCode != lastKeyCode || (currentTime -   lastKeyPressTime ) > DEBOUNCE_DELAY)) {
+      lastKeyCode = kCode;
+        lastKeyPressTime  = currentTime;
+      
+      // Skip key #16 (often used internally by keypad libraries)
+      if (kCode == 16) continue;
+      
       char k = mapKeypadCodeToChar(kCode);
       
+      // Exit condition
       if (k == '#') break;
       
+      // Process valid keys
       if ((k >= '0' && k <= '9') || (k >= 'A' && k <= 'D')) {
         if (pinLength < 4) {
           newAdminPIN[pinLength] = k;
-          newAdminPIN[pinLength+1] = 0;
+          newAdminPIN[pinLength+1] = 0; // Keep string null-terminated
           pinLength++;
           
+          // Update display
           lcd.setCursor(0, 1);
           lcd.print(newAdminPIN);
         }
       }
     }
-    delay(50);
+    
+    // Small delay for system stability
+    delay(10);
   }
   
+  // Process the entered PIN
   if (strlen(newAdminPIN) == 4) {
     storeAdminPIN(newAdminPIN);
     lcd.clear();
@@ -1193,7 +1424,6 @@ void handleChangeAdminPIN() {
   
   delay(LONG_DELAY);
 }
-
 /*********************** REMOTE COMMAND PROCESSING **************************/
 void processRemoteCommand() {
   if (Serial.available()) {
