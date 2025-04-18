@@ -95,6 +95,9 @@ unsigned long doorOpenTime = 0;
 unsigned long lockoutStart = 0;
 int adminMenuPage = 0;
 String tempString = "";                 // For temporary string operations
+// Thêm vào phần khai báo biến global
+unsigned long lastKeyPressTime = 0;
+uint8_t lastKeyCode = 0;
 
 // Admin PIN stored in EEPROM
 char adminPIN[5] = "0000";
@@ -154,31 +157,33 @@ void handleDeleteUser();
 void handleChangeAdminPIN();
 void showAuthResult(bool success, const char* method);
 void showMenuPrompt(const char* title, const char* prompt);
-  unsigned long lastKeyPressTime = 0;
-  uint8_t lastKeyCode = 0;
+
 
 /*********************** SETUP **************************/
 void setup() {
-  // Initialize serial communication
-  Serial.begin(115200);
+  // Khởi tạo giao tiếp Serial cho cả debug và giao tiếp ESP32
+  Serial.begin(9600);  // Đổi thành 9600 để khớp với cấu hình ESP32
   Serial.println(F("Door Access Control System"));
   
-  // Initialize I2C
+  // Chờ một chút để ổn định kết nối Serial
+  delay(100);
+  
+  // Khởi tạo I2C
   Wire.begin();
   
-  // Setup LCD
+  // Thiết lập LCD
   setupLCD();
   
-  // Initialize keypad
+  // Khởi tạo keypad
   keypad.begin();
   
-  // Setup RFID
+  // Thiết lập RFID
   SPI.begin();
   delay(50);
   mfrc522.PCD_Init();
   delay(100);
 
-  // Test if RFID reader is working
+  // Kiểm tra xem đầu đọc RFID có hoạt động không
   byte v = mfrc522.PCD_ReadRegister(mfrc522.VersionReg);
   if (v == 0x00 || v == 0xFF) {
     Serial.println(F("WARNING: RFID reader not working properly!"));
@@ -192,7 +197,7 @@ void setup() {
     Serial.println(v, HEX);
   }
   
-  // Setup fingerprint sensor
+  // Thiết lập cảm biến vân tay
   finger.begin(57600);
   if (finger.verifyPassword()) {
     Serial.println(F("Fingerprint sensor found"));
@@ -200,12 +205,12 @@ void setup() {
     Serial.println(F("Fingerprint sensor not found"));
   }
   
-  // Initialize servo and set to locked position
+  // Khởi tạo servo và đặt ở vị trí khóa
   doorServo.attach(PIN_SERVO);
   doorServo.write(0);
   doorServo.detach();
   
-  // Configure relay, buzzer and door button
+  // Cấu hình relay, buzzer và nút mở cửa
   pinMode(PIN_RELAY, OUTPUT);
   digitalWrite(PIN_RELAY, LOW);
   
@@ -214,57 +219,66 @@ void setup() {
   
   pinMode(PIN_DOOR_BTN, INPUT_PULLUP);
   
-  // Initialize EEPROM if user count is invalid
+  // Khởi tạo EEPROM nếu số lượng người dùng không hợp lệ
   if (getUserCount() > MAX_USERS) {
     setUserCount(0);
   }
   
-  // Load admin PIN from EEPROM
+  // Tải mã PIN quản trị từ EEPROM
   loadAdminPIN();
   
-  // Ready to operate
+  // Gửi phản hồi ban đầu cho ESP32
+  Serial.println(F("ARDUINO_READY"));
+  
+  // Sẵn sàng vận hành
   showIdleScreen();
   beepOk();
 }
 
 /*********************** MAIN LOOP **************************/
 void loop() {
-  // Get current time for various timers
+  // Lấy thời gian hiện tại cho các bộ hẹn giờ
   unsigned long currentTime = millis();
   
-  // Process system based on current state
+  // Luôn kiểm tra lệnh từ ESP32 với độ ưu tiên cao
+  processRemoteCommand();
+  
+  // Xử lý hệ thống dựa trên trạng thái hiện tại
   switch (currentState) {
     case STATE_LOCKOUT:
-      // Check if lockout period has expired
+      // Kiểm tra xem thời gian khóa đã hết chưa
       if (currentTime - lockoutStart > LOCKOUT_DURATION) {
         failCount = 0;
         currentState = STATE_IDLE;
         showIdleScreen();
       }
-      // During lockout, only process remote commands
-      processRemoteCommand();
+      // Trong thời gian khóa, chỉ xử lý lệnh từ xa
       break;
       
     case STATE_DOOR_OPEN:
-      // Check if door should be closed
+      // Kiểm tra xem cửa có nên đóng không
       if (currentTime - doorOpenTime > DOOR_OPEN_DURATION) {
+        // Thông báo sắp đóng cửa
+        Serial.println(F("EVENT:DOOR_CLOSING"));
+        
+        // Đóng cửa
         lockDoor();
         currentState = STATE_IDLE;
+        showIdleScreen();
       }
-      // While door is open, still process inputs
+      
+      // Khi cửa đang mở, vẫn xử lý các đầu vào
       processUserInput();
-      processRemoteCommand();
       checkDoorButton();
       break;
       
     case STATE_IDLE:
     case STATE_PIN_ENTRY:
-      // Process all input methods in normal operation
+      // Xử lý tất cả các phương thức đầu vào trong hoạt động bình thường
       processUserInput();
-      processRemoteCommand();
       checkDoorButton();
       
-      // Check for authentication methods on a timed basis
+      // Kiểm tra các phương thức xác thực theo thời gian
       static unsigned long lastRFIDCheck = 0;
       if (currentTime - lastRFIDCheck > 100) {
         processRFID();
@@ -279,11 +293,43 @@ void loop() {
       break;
       
     case STATE_ADMIN_MENU:
-      // Admin menu is handled separately
+      // Menu quản trị được xử lý riêng
       adminModeMenu();
       break;
   }
+  
+  // Phát hiện và báo cáo thay đổi trạng thái cửa
+  static bool lastDoorState = false;
+  if (doorOpen != lastDoorState) {
+    lastDoorState = doorOpen;
+    // Gửi cập nhật trạng thái cửa cho ESP32
+    Serial.print(F("STATUS:"));
+    Serial.println(doorOpen ? F("OPEN") : F("CLOSED"));
+  }
+  
+  // Kiểm tra tính toàn vẹn của hệ thống theo định kỳ
+  static unsigned long lastSystemCheck = 0;
+  if (currentTime - lastSystemCheck > 30000) { // Mỗi 30 giây
+    // Kiểm tra các cảm biến và thiết bị
+    bool rfidOk = mfrc522.PCD_ReadRegister(mfrc522.VersionReg) != 0 &&
+                 mfrc522.PCD_ReadRegister(mfrc522.VersionReg) != 0xFF;
+    bool fpOk = finger.verifyPassword();
+    
+    // Gửi báo cáo trạng thái nếu có lỗi
+    if (!rfidOk || !fpOk) {
+      Serial.print(F("ALERT:DEVICE_ERROR,"));
+      Serial.print(rfidOk ? F("RFID_OK") : F("RFID_ERROR"));
+      Serial.print(F(","));
+      Serial.println(fpOk ? F("FP_OK") : F("FP_ERROR"));
+    }
+    
+    lastSystemCheck = currentTime;
+  }
+  
+  // Giảm tải CPU
+  delay(10);
 }
+
 
 /*********************** INPUT PROCESSING **************************/
 void processUserInput() {
@@ -543,31 +589,57 @@ void openDoor(const char* method) {
   showAuthResult(true, method);
   beepSuccess();
   
-  // Log access event
-  Serial.print(F("EVENT:ACCESS_GRANTED via "));
+  // Ghi log sự kiện truy cập
+  Serial.print(F("EVENT:ACCESS_GRANTED,"));
   Serial.println(method);
+  
+  // Kích hoạt servo một cách đáng tin cậy
   doorServo.attach(PIN_SERVO);
-  // Unlock door
+  delay(50); // Đợi servo khởi động
+  
+  // Mở khóa cửa với góc mở phù hợp (điều chỉnh nếu cần)
   doorServo.write(110);
   digitalWrite(PIN_RELAY, HIGH);
   
+  // Cập nhật trạng thái
   doorOpen = true;
   doorOpenTime = millis();
   failCount = 0;
   currentState = STATE_DOOR_OPEN;
+  
+  // Gửi xác nhận trạng thái
+  Serial.println(F("STATUS:OPEN"));
+  
   showIdleScreen();
 }
 
+
+
 void lockDoor() {
+  // Đảm bảo servo được kết nối
   doorServo.attach(PIN_SERVO);
+  delay(50); // Đợi servo khởi động
+
+  
+  // Đảm bảo vị trí cuối cùng chính xác
   doorServo.write(0);
+  delay(200);
+  
+  // Tắt relay
   digitalWrite(PIN_RELAY, LOW);
   doorOpen = false;
-  delay(100);
+  
+  // Ngắt kết nối servo để tiết kiệm năng lượng và giảm rung
+  delay(500); // Đợi servo ổn định
   doorServo.detach();
+  
+  // Gửi xác nhận trạng thái
+  Serial.println(F("STATUS:CLOSED"));
   Serial.println(F("EVENT:DOOR_LOCKED"));
+  
   showIdleScreen();
 }
+
 
 /*********************** LCD INTERFACE **************************/
 void setupLCD() {
@@ -1430,16 +1502,70 @@ void processRemoteCommand() {
     String cmd = Serial.readStringUntil('\n');
     cmd.trim();
     
-    Serial.print(F("Remote cmd: "));
-    Serial.println(cmd);
-    
-    // Remote door unlock
-    if (cmd.equals("UNLOCK_NOW")) {
-      openDoor("Remote");
-      Serial.println(F("OK:Door unlocked"));
+    // Xử lý lệnh cơ bản
+    if (cmd.equals("PING")) {
+      Serial.println(F("OK"));
     }
     
-    // Add RFID user
+    // Lệnh trạng thái cửa
+    else if (cmd.equals("STATUS")) {
+      Serial.print(F("STATUS:"));
+      Serial.println(doorOpen ? F("OPEN") : F("CLOSED"));
+    }
+    
+    // Thông tin hệ thống
+    else if (cmd.equals("SYSTEM_INFO")) {
+      Serial.print(F("INFO:USERS="));
+      Serial.print(getUserCount());
+      Serial.print(F(",FIRMWARE="));
+      Serial.print(F("1.0.0"));
+      Serial.print(F(",DOOR="));
+      Serial.print(doorOpen ? F("OPEN") : F("CLOSED"));
+      Serial.print(F(",SERVO="));
+      Serial.println(F("READY"));
+    }
+    
+    // Lệnh mở cửa
+    else if (cmd.equals("DOOR:OPEN")) {
+      // Chỉ mở cửa nếu cửa đang đóng
+      if (!doorOpen) {
+        openDoor("ESP32");
+        Serial.println(F("OK:DOOR_OPENED"));
+      } else {
+        // Nếu cửa đã mở, cập nhật thời gian để kéo dài
+        doorOpenTime = millis();
+        Serial.println(F("OK:ALREADY_OPEN"));
+      }
+    }
+    
+    // Lệnh đóng cửa
+    else if (cmd.equals("DOOR:CLOSE")) {
+      if (doorOpen) {
+        lockDoor();
+        Serial.println(F("OK:DOOR_CLOSED"));
+      } else {
+        Serial.println(F("OK:ALREADY_CLOSED"));
+      }
+    }
+    
+    // Lệnh đóng mở cửa khẩn cấp
+    else if (cmd.equals("UNLOCK_NOW") || cmd.equals("EMERGENCY_OPEN")) {
+      openDoor("Emergency");
+      Serial.println(F("OK:EMERGENCY_UNLOCKED"));
+    }
+    
+    // Liệt kê người dùng
+    else if (cmd.equals("LIST_USERS")) {
+      listUsers();
+      Serial.println(F("OK:USER_LIST_COMPLETE"));
+    }
+    
+    // Lệnh thiết lập lại thời gian
+    else if (cmd.startsWith("SET_TIME,")) {
+      Serial.println(F("OK:TIME_SET"));
+    }
+    
+    // Thêm người dùng RFID
     else if (cmd.startsWith("ADD_RFID,")) {
       int idx = cmd.indexOf(',');
       String uid = cmd.substring(idx + 1);
@@ -1451,12 +1577,12 @@ void processRemoteCommand() {
       uid.toCharArray(newUser.credential, 16);
       
       if (addUserRecord(newUser))
-        Serial.println(F("OK: RFID Added"));
+        Serial.println(F("OK:RFID_ADDED"));
       else
-        Serial.println(F("ERR: EEPROM full"));
+        Serial.println(F("ERR:EEPROM_FULL"));
     }
     
-    // Add PIN user
+    // Thêm người dùng PIN
     else if (cmd.startsWith("ADD_PIN,")) {
       int idx = cmd.indexOf(',');
       String pin = cmd.substring(idx + 1);
@@ -1468,12 +1594,12 @@ void processRemoteCommand() {
       pin.toCharArray(newUser.credential, 16);
       
       if (addUserRecord(newUser))
-        Serial.println(F("OK: PIN Added"));
+        Serial.println(F("OK:PIN_ADDED"));
       else
-        Serial.println(F("ERR: EEPROM full"));
+        Serial.println(F("ERR:EEPROM_FULL"));
     }
     
-    // Add fingerprint user
+    // Thêm người dùng vân tay
     else if (cmd.startsWith("ADD_FP,")) {
       int idx = cmd.indexOf(',');
       String fpIDstr = cmd.substring(idx + 1);
@@ -1485,42 +1611,96 @@ void processRemoteCommand() {
       fpIDstr.toCharArray(newUser.credential, 16);
       
       if (addUserRecord(newUser))
-        Serial.println(F("OK: Fingerprint Added"));
+        Serial.println(F("OK:FINGERPRINT_ADDED"));
       else
-        Serial.println(F("ERR: EEPROM full"));
+        Serial.println(F("ERR:EEPROM_FULL"));
     }
     
-    // Remove user
+    // Xóa người dùng
     else if (cmd.startsWith("REMOVE_USER,")) {
       int idx = cmd.indexOf(',');
       String idStr = cmd.substring(idx + 1);
       uint8_t userID = idStr.toInt();
       
       if (removeUserRecord(userID))
-        Serial.println(F("OK: User Removed"));
+        Serial.println(F("OK:USER_REMOVED"));
       else
-        Serial.println(F("ERR: User not found"));
+        Serial.println(F("ERR:USER_NOT_FOUND"));
     }
     
-    // List users
-    else if (cmd.equals("LIST_USERS")) {
-      listUsers();
+    // Kiểm tra Servo
+    else if (cmd.equals("TEST_SERVO")) {
+      // Kiểm tra servo trong khi vẫn duy trì trạng thái hiện tại
+      bool wasDoorOpen = doorOpen;
+      
+      // Chạy kiểm tra servo
+      Serial.println(F("START:SERVO_TEST"));
+      doorServo.attach(PIN_SERVO);
+      delay(100);
+      
+      // Di chuyển từ từ tới vị trí khóa
+      doorServo.write(0);
+      delay(1000);
+      
+      // Di chuyển từ từ tới vị trí mở
+      for (int pos = 0; pos <= 110; pos += 10) {
+        doorServo.write(pos);
+        delay(100);
+      }
+      
+      // Đảm bảo vị trí mở đầy đủ
+      doorServo.write(110);
+      delay(1000);
+      
+      // Di chuyển về vị trí khóa
+      for (int pos = 110; pos >= 0; pos -= 10) {
+        doorServo.write(pos);
+        delay(100);
+      }
+      
+      doorServo.write(0);
+      delay(500);
+      
+      // Khôi phục trạng thái trước khi kiểm tra
+      if (wasDoorOpen) {
+        doorServo.write(110);
+        doorOpen = true;
+      } else {
+        doorServo.write(0);
+        doorServo.detach();
+        doorOpen = false;
+      }
+      
+      Serial.println(F("END:SERVO_TEST"));
+      Serial.println(F("OK:SERVO_TESTED"));
     }
     
-    // Change admin PIN
+    // Thay đổi mã PIN quản trị
     else if (cmd.startsWith("SET_ADMIN,")) {
       int idx = cmd.indexOf(',');
       String newPIN = cmd.substring(idx+1);
       
       if (newPIN.length() == 4) {
         storeAdminPIN(newPIN.c_str());
-        Serial.println(F("OK: Admin PIN Updated"));
+        Serial.println(F("OK:ADMIN_PIN_UPDATED"));
       } else {
-        Serial.println(F("ERR: Invalid PIN length"));
+        Serial.println(F("ERR:INVALID_PIN_LENGTH"));
       }
+    }
+    
+    // Lệnh không xác định
+    else {
+      Serial.print(F("ERR:UNKNOWN_COMMAND-"));
+      Serial.println(cmd);
+    }
+    
+    // Khôi phục màn hình nếu cần
+    if (currentState == STATE_IDLE) {
+      showIdleScreen();
     }
   }
 }
+
 
 /*********************** EEPROM FUNCTIONS **************************/
 int getUserCount() {
