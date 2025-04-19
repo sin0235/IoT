@@ -286,28 +286,32 @@ void handleArduinoEvent(String eventData) {
 void saveAccessLog(String method) {
   preferences.begin("doorlogs", false);
   
-  // Get current count and handle rollover
+  // Get current count with overflow handling
   int logCount = preferences.getInt("logCount", 0);
-  if(logCount >= 50) logCount = 0; // Use circular buffer approach
+  if (logCount >= 50) logCount = 0;
   
-  // Create timestamp (using real time if available)
-  String timeStr = String(millis());
+  // Create timestamp with explicit detail
+  unsigned long timestamp = millis();
+  String timeStr = String(timestamp);
   
-  // Create structured log entry
+  // Create detailed log
   String logKey = "log" + String(logCount);
-  String logValue = timeStr + "|" + method + "|" + "Mo cua";
+  String logValue = timeStr + "|" + method + "|" + "Door opened";
   
-  // Debug
-  Serial.print("Saving log: ");
+  // Debug log saving
+  Serial.print("Saving log #");
+  Serial.print(logCount);
+  Serial.print(": ");
   Serial.println(logValue);
   
-  // Store log and increment counter
+  // Store log with sync
   preferences.putString(logKey.c_str(), logValue.c_str());
   preferences.putInt("logCount", logCount + 1);
-  
-  // Ensure data is committed
   preferences.end();
+  
+  Serial.println("Log saved successfully");
 }
+
 
 // ===== KET NOI WIFI =====
 void connectToWiFi() {
@@ -2076,7 +2080,7 @@ void handleDoorStatus() {
 }
 
 void handleOpenDoor() {
-  // Parse user data from client
+  // Parse data from client
   String user = "web_user";
   if (server.hasArg("plain")) {
     DynamicJsonDocument doc(200);
@@ -2087,10 +2091,13 @@ void handleOpenDoor() {
     }
   }
   
-  // Send door open command with explicit reset timer instruction
+  // Send command with force timer reset flag
+  Serial.println("Starting door open sequence from web...");
   String response = sendCommandToArduino("DOOR:OPEN:RESET_TIMER", 5000);
   
+  // Check response
   if (response.startsWith("OK:")) {
+    Serial.println("Door command successful: " + response);
     doorIsOpen = true;
     lastAccessUser = user;
     lastAccessTime = millis();
@@ -2098,11 +2105,14 @@ void handleOpenDoor() {
     // Save log
     saveAccessLog(user);
     
-    server.send(200, "application/json", "{\"success\":true,\"message\":\"Door opened successfully\"}");
+    // Send success response to browser
+    server.send(200, "application/json", "{\"success\":true,\"message\":\"Door opened successfully\",\"timestamp\":" + String(millis()) + "}");
   } else {
+    Serial.println("Door command failed: " + response);
     server.send(200, "application/json", "{\"success\":false,\"message\":\"" + response + "\"}");
   }
 }
+
 
 
 void handleGetUsers() {

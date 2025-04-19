@@ -256,23 +256,45 @@ void loop() {
       // Trong thời gian khóa, chỉ xử lý lệnh từ xa
       break;
       
-    case STATE_DOOR_OPEN:
-      // Kiểm tra xem cửa có nên đóng không
-      if (currentTime - doorOpenTime > DOOR_OPEN_DURATION) {
-        // Thông báo sắp đóng cửa
-        Serial.println(F("EVENT:DOOR_CLOSING"));
-        
-        // Đóng cửa
-        lockDoor();
-        currentState = STATE_IDLE;
-        showIdleScreen();
-      }
+case STATE_DOOR_OPEN:
+  // Check if door should be closed with safe time comparison
+  if (currentTime > doorOpenTime) {
+    unsigned long elapsed = currentTime - doorOpenTime;
+    
+    // Only close door if time elapsed exceeds duration
+    if (elapsed > DOOR_OPEN_DURATION) {
+      // Log door closing event with timestamps
+      Serial.print(F("DEBUG: Closing door after "));
+      Serial.print(elapsed);
+      Serial.println(F(" ms"));
+      Serial.println(F("EVENT:DOOR_CLOSING"));
       
-      // Khi cửa đang mở, vẫn xử lý các đầu vào
-      processUserInput();
-      checkDoorButton();
-      break;
-      
+      // Close the door
+      lockDoor();
+      currentState = STATE_IDLE;
+      showIdleScreen();
+    } 
+    // Add a periodic debug message to track timer
+    else if (elapsed % 1000 < 10) { // Output roughly every second
+      Serial.print(F("DEBUG: Door open for "));
+      Serial.print(elapsed);
+      Serial.print(F("/"));
+      Serial.print(DOOR_OPEN_DURATION);
+      Serial.println(F(" ms"));
+    }
+  } 
+  else {
+    // Handle millis() overflow case
+    Serial.println(F("DEBUG: Timer overflow detected"));
+    // Reset timer to prevent immediate closing
+    doorOpenTime = currentTime;
+  }
+  
+  // Process other inputs while door is open
+  processUserInput();
+  checkDoorButton();
+  break;
+
     case STATE_IDLE:
     case STATE_PIN_ENTRY:
       // Xử lý tất cả các phương thức đầu vào trong hoạt động bình thường
@@ -587,35 +609,49 @@ void beepSuccess() {
 
 /*********************** DOOR CONTROL **************************/
 void openDoor(const char* method) {
+  // Show success and beep
   showAuthResult(true, method);
   beepSuccess();
   
-  // Enhanced event logging with consistent format
+  // Add debug message to track door operation
+  Serial.print(F("DEBUG: Opening door via "));
+  Serial.println(method);
+  
+  // Record access event
   Serial.print(F("EVENT:ACCESS_GRANTED,"));
   Serial.println(method);
   
-  // Activate door mechanisms
+  // Activate hardware
   digitalWrite(PIN_RELAY, HIGH);
   delay(300);
   
+  // Control servo with proper timing
   doorServo.attach(PIN_SERVO);
-  delay(50);
-  
+  delay(100); // Longer delay for servo to initialize
   doorServo.write(110);
-  delay(100);
+  delay(500); // Longer delay to ensure movement completes
   doorServo.detach();
   
-  // Update state variables
+  // Set state variables with explicit timestamps
   doorOpen = true;
   doorOpenTime = millis();
+  
+  // Add explicit debug message for timer
+  Serial.print(F("DEBUG: Door timer started at "));
+  Serial.print(doorOpenTime);
+  Serial.print(F(" for "));
+  Serial.print(DOOR_OPEN_DURATION);
+  Serial.println(F(" ms"));
+  
   failCount = 0;
   currentState = STATE_DOOR_OPEN;
   
-  // Ensure status is properly sent
+  // Send status update
   Serial.println(F("STATUS:OPEN"));
   
   showIdleScreen();
 }
+
 
 
 
@@ -1535,16 +1571,26 @@ void processRemoteCommand() {
     
     // Enhanced door open command with explicit timer reset
     else if (cmd.equals("DOOR:OPEN:RESET_TIMER")) {
-      lcd.clear();
-      lcd.print(F("Web Request:"));
-      lcd.setCursor(0, 1);
-      lcd.print(F("Opening Door+Timer"));
-      
-      // Force timer reset and door open
-      doorOpenTime = millis();
-      openDoor("ESP32_Web_Reset");
-      Serial.println(F("OK:DOOR_OPENED_TIMER_RESET"));
-    }
+    lcd.clear();
+    lcd.print(F("Web Request:"));
+    lcd.setCursor(0, 1);
+    lcd.print(F("Extended Open"));
+    
+    // Force door timer reset with explicit confirmation
+    Serial.println(F("OK:TIMER_RESET_CONFIRMED"));
+    
+    // Always open door with forced timer
+    doorOpenTime = millis(); // Set time before opening
+    openDoor("Web_Extended");
+    
+    // Force timer again after open completes
+    doorOpenTime = millis();
+    
+    // Explicit success confirmation
+    Serial.println(F("STATUS:OPEN"));
+    Serial.println(F("OK:DOOR_OPENED_EXTENDED"));
+  }
+
     
     // Door close command
     else if (cmd.equals("DOOR:CLOSE")) {
