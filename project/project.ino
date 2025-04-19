@@ -662,8 +662,8 @@ void lockDoor() {
   
   // Đảm bảo vị trí cuối cùng chính xác
   doorServo.write(0);
-  delay(50);
-    doorServo.detach();
+  delay(100);
+  doorServo.detach();
   delay(500);
   
   // Tắt relay

@@ -284,7 +284,18 @@ void loop() {
     }
     lastWiFiCheckTime = millis();
   }
-  
+  static unsigned long resetButtonPressTime = 0;
+  if (digitalRead(0) == LOW) {
+    if (resetButtonPressTime == 0) {
+      resetButtonPressTime = millis();
+    } else if (millis() - resetButtonPressTime > 5000) {
+      Serial.println("Nút reset được nhấn giữ 5 giây, xóa cấu hình WiFi và khởi động lại...");
+      clearWiFiConfig();
+      ESP.restart();
+    }
+  } else {
+    resetButtonPressTime = 0;
+  }
   // Giảm tải CPU
   delay(10);
 }
