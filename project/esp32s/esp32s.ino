@@ -2281,7 +2281,7 @@ void handleUserDashboard() {
     "      </div>"
     "    </div>"
     "    <div class='footer'>"
-    "      <p>© 2025 Smart Door System. Bản quyền thuộc về tác giả.</p>"
+    "      <p>© 2025 Smart Door System. SIN.</p>"
     "    </div>"
     "  </div>"
     "</div>";
@@ -2421,7 +2421,7 @@ void handleOpenDoor() {
     
     server.send(200, "application/json", "{\"success\":true,\"message\":\"Door opened successfully\"}");
   } else {
-    server.send(200, "application/json", "{\"success\":false,\"message\":\"Failed to open door: " + response + "\"}");
+    server.send(200, "application/json", "{\"success\":false,\"message\":\Something's wrong: " + response + "\"}");
   }
 }
 
