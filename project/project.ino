@@ -885,15 +885,34 @@ void handleAddRFIDUser() {
   lcd.setCursor(0, 1);
   lcd.print(F("card now..."));
   
+  // Thông báo cho ESP32 rằng đang trong chế độ nhận RFID
+  Serial.println(F("CMD:WAITING_FOR_RFID"));
+  
   unsigned long startTime = millis();
   bool cardFound = false;
   String uidStr = "";
   
   // Wait for RFID card (10 second timeout)
   while (millis() - startTime < TIMEOUT_DURATION && !cardFound) {
+    // Kiểm tra RFID trên Arduino nếu có module
     if (mfrc522.PICC_IsNewCardPresent() && mfrc522.PICC_ReadCardSerial()) {
       uidStr = getUIDFromRFIDTag();
+      cardFound = true;
+    }
+    
+    // Kiểm tra xem có dữ liệu RFID từ ESP32 không
+    if (Serial.available()) {
+      String cmd = Serial.readStringUntil('\n');
+      cmd.trim();
       
+      if (cmd.startsWith("RFID:")) {
+        uidStr = cmd.substring(5); // Lấy phần sau "RFID:"
+        cardFound = true;
+        Serial.println(F("Received RFID from ESP32"));
+      }
+    }
+    
+    if (cardFound) {
       lcd.clear();
       lcd.print(F("RFID Found:"));
       lcd.setCursor(0, 1);
@@ -915,6 +934,8 @@ void handleAddRFIDUser() {
           lcd.print(F("ID: "));
           lcd.print(newUser.userID);
           beepOk();
+          Serial.print(F("EVENT:RFID_ADDED,"));
+          Serial.println(uidStr);
         } else {
           lcd.clear();
           lcd.print(F("EEPROM Full"));
@@ -927,12 +948,13 @@ void handleAddRFIDUser() {
         lcd.print(F("exists!"));
         beepError();
       }
-      
-      cardFound = true;
-      mfrc522.PICC_HaltA();
     }
+    
     delay(50);
   }
+  
+  // Thông báo cho ESP32 rằng đã kết thúc chế độ nhận RFID
+  Serial.println(F("CMD:RFID_WAIT_END"));
   
   if (!cardFound) {
     lcd.clear();
@@ -944,6 +966,7 @@ void handleAddRFIDUser() {
   
   delay(LONG_DELAY);
 }
+
 
 void handleAddPINUser() {
   const uint8_t MIN_PIN_LENGTH = 4;

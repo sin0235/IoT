@@ -9,8 +9,15 @@
 #include <ArduinoJson.h>
 #include <Preferences.h>
 #include <ESPmDNS.h>
-#include <Update.h>
+bool adminCardMode = false; 
 
+#include <SPI.h>
+#include <MFRC522.h>
+
+// Định nghĩa chân cho RFID
+#define RFID_RST_PIN     22    // RC522 RST pin
+#define RFID_SS_PIN      5     // RC522 SS/SDA pin
+MFRC522 mfrc522(RFID_SS_PIN, RFID_RST_PIN);
 // ===== CAU HINH WIFI =====
 const char* Ssid = "Wi-MESH 2.4G";     
 const char* Password = "25032005"; 
@@ -49,7 +56,7 @@ bool responseReceived = false;
 String lastResponse = "";
 
 // Function declarations
-String sendCommandToArduino(String command, unsigned long timeout = COMMAND_TIMEOUT);
+String sendCommandToArduino(String command, long unsigned int timeout = COMMAND_TIMEOUT);
 void checkArduinoResponse();
 bool checkArduinoConnection();
 void loadUsers();
@@ -90,6 +97,18 @@ void setup() {
   // Khởi tạo cổng Serial2 để giao tiếp với Arduino
   Serial2.begin(ARDUINO_BAUD_RATE, SERIAL_8N1, 16, 17);
   Serial.println("Đã khởi tạo kết nối với Arduino qua Serial2");
+  SPI.begin();
+  mfrc522.PCD_Init();
+  delay(50);
+  
+  // Kiểm tra RFID reader
+  byte v = mfrc522.PCD_ReadRegister(mfrc522.VersionReg);
+  if (v == 0x00 || v == 0xFF) {
+    Serial.println("CẢNH BÁO: Không thể kết nối với đầu đọc RFID!");
+  } else {
+    Serial.print("Đầu đọc RFID đã kết nối. Phiên bản: 0x");
+    Serial.println(v, HEX);
+  }
   
   // Khởi tạo SPIFFS
   if(!SPIFFS.begin(true)) {
@@ -207,7 +226,12 @@ void loop() {
   if(Serial2.available()) {
     checkArduinoResponse();
   }
-
+  static unsigned long lastRfidCheckTime = 0;
+    if (millis() - lastRfidCheckTime > 100) { // Kiểm tra mỗi 100ms
+      processRFID();
+      lastRfidCheckTime = millis();
+    }
+    
   static unsigned long lastStatusCheck = 0;
   if (millis() - lastStatusCheck > 3000) { // Every 3 seconds
     String status = sendCommandToArduino("STATUS", 1000);
@@ -405,29 +429,39 @@ bool checkArduinoConnection() {
   return sendCommandToArduino("PING", 1000).startsWith("OK");
 }
 
-// Gui lenh den Arduino va doi phan hoi
-String sendCommandToArduino(String command, unsigned long timeout) {
-  // Reset status variables
+// Gui lenh den Arduino va doi phan h
+String sendCommandToArduino(String command, long unsigned int timeout ) {
+  // Reset biến trạng thái
   lastResponse = "";
   responseReceived = false;
   
-  // Clear input buffer before sending command
+  // Xóa bộ đệm trước khi gửi lệnh
   while (Serial2.available()) {
     Serial2.read();
   }
   
-  // Send command with clear logging
+  // Đảm bảo Serial2 được khởi tạo
+  if (!Serial2) {
+    Serial.println("ERROR: Serial2 not initialized!");
+    return "ERROR";
+  }
+  
+  // Gửi lệnh với log rõ ràng
   Serial.println("Sending to Arduino: " + command);
   Serial2.println(command);
+  Serial2.flush(); // Đảm bảo lệnh được gửi hoàn toàn
   
-  // Wait with proper timeout handling
+  // Đợi với xử lý timeout thích hợp
   unsigned long startTime = millis();
   while (!responseReceived && (millis() - startTime < timeout)) {
-    checkArduinoResponse();
-    delay(10);
+    if (Serial2.available()) {
+      checkArduinoResponse();
+    }
+    delay(5);
   }
   
   if (responseReceived) {
+    Serial.println("Received response: " + lastResponse);
     return lastResponse;
   } else {
     Serial.println("Timeout when sending command: " + command);
@@ -440,21 +474,35 @@ String sendCommandToArduino(String command, unsigned long timeout) {
 void checkArduinoResponse() {
   while(Serial2.available()) {
     char c = Serial2.read();
+    
+    // Debug xem ký tự nhận được
+    Serial.print("Byte received: ");
+    Serial.print((int)c);
+    Serial.print(" (");
+    Serial.print(c);
+    Serial.println(")");
+    
     serialBuffer += c;
     
-    // Kiem tra xem co dong hoan chinh khong
-    if(c == '\n') {
-      int newlinePos = serialBuffer.indexOf('\n');
-      if(newlinePos >= 0) {
-        String line = serialBuffer.substring(0, newlinePos);
-        serialBuffer = serialBuffer.substring(newlinePos + 1);
+    // Kiểm tra xem có dòng hoàn chỉnh không
+    if(c == '\n' || c == '\r') {
+serialBuffer.trim(); // Loại bỏ khoảng trắng
+String line = serialBuffer; // Gán giá trị đã được xử lý/ Loại bỏ whitespace
+      
+      if(line.length() > 0) {
+        lastResponse = line;
+        responseReceived = true;
+        Serial.println("Processed line from Arduino: [" + line + "]");
         
-        // Xu ly phan hoi
-        if(line.length() > 0) {
-          lastResponse = line;
-          responseReceived = true;
-          Serial.println("Nhan tu Arduino: " + line);
+        // Xử lý các lệnh đặc biệt
+        if(line.equals("OK")) {
+          Serial.println("Received OK confirmation");
+        } else if(line.startsWith("STATUS:")) {
+          Serial.println("Received status update: " + line);
         }
+        
+        // Reset buffer sau khi xử lý dòng
+        serialBuffer = "";
       }
     }
   }
@@ -595,7 +643,8 @@ void setupServerRoutes() {
   // Trang chu va dang nhap
   server.on("/", HTTP_GET, handleRoot);
   server.on("/login", HTTP_POST, handleLogin);
-  
+  server.on("/api/arduino-status", HTTP_GET, handleArduinoStatus);
+
   // Trang dieu khien
   server.on("/admin", HTTP_GET, handleAdminPanel);
   server.on("/dashboard", HTTP_GET, handleUserDashboard);
@@ -1537,6 +1586,16 @@ void handleAdminPanel() {
     "      </div>"
     "    </div>"
     "    "
+        "    <div class=\"panel\">"
+    "      <h2><i class=\"fas fa-id-card\"></i> Quản lý thẻ RFID</h2>"
+    "      <div class=\"info-box\" style=\"background-color: #e3f2fd; border-left: 4px solid #4361ee; padding: 15px; margin-bottom: 20px; border-radius: 4px;\">"
+    "        <p style=\"margin: 0;\"><i class=\"fas fa-info-circle\"></i> <strong>Lưu ý quan trọng:</strong> Việc thêm, xóa và quản lý thẻ RFID, vân tay, và mã PIN phải được thực hiện trực tiếp thông qua giao diện vật lý của Arduino (bàn phím và màn hình LCD). Các chức năng này không có sẵn thông qua giao diện web.</p>"
+    "      </div>"
+    "      <div class=\"info-secondary\" style=\"background-color: #fff3cd; border-left: 4px solid #ffc107; padding: 15px; border-radius: 4px;\">"
+    "        <p style=\"margin: 0;\"><i class=\"fas fa-lightbulb\"></i> <strong>Hướng dẫn:</strong> Để quản lý thẻ RFID, vui lòng sử dụng menu Admin trên thiết bị Arduino bằng cách nhập mã PIN quản trị viên trên bàn phím.</p>"
+    "      </div>"
+    "    </div>"
+    "     "
     "    <div class=\"panel\">"
     "      <h2><i class=\"fas fa-users\"></i> Quản lý người dùng</h2>"
     "      <button onclick=\"toggleUserForm()\"><i class=\"fas fa-user-plus\"></i> Thêm người dùng</button>"
@@ -1842,6 +1901,24 @@ void handleAdminPanel() {
     "      document.body.removeChild(alertDiv);"
     "    }, 500);"
     "  }, 3000);"
+    "}"
+    "function checkArduinoStatus() {"
+    "  fetch('/api/arduino-status')"
+    "    .then(response => response.json())"
+    "    .then(data => {"
+    "      const statusEl = document.getElementById('arduinoStatus');"
+    "      if (data.connected) {"
+    "        statusEl.className = 'status open';"
+    "        statusEl.innerHTML = '<i class=\"fas fa-check-circle\"></i> Arduino connected - Door controller online';"
+    "      } else {"
+    "        statusEl.className = 'status closed';"
+    "        statusEl.innerHTML = '<i class=\"fas fa-exclamation-triangle\"></i> Arduino not connected - Door control unavailable';"
+    "      }"
+    "    })"
+    "    .catch(error => {"
+    "      console.error('Error checking Arduino status:', error);"
+    "      document.getElementById('arduinoStatus').innerHTML = '<i class=\"fas fa-exclamation-triangle\"></i> Error checking connection';"
+    "    });"
     "}"
     "</script>"
     "</body>"
@@ -2202,16 +2279,19 @@ void handleUserDashboard() {
     "  </div>"
     "</div>";
   
-  // JavaScript với các chức năng giữ nguyên
   html += "<script>"
     "    let doorOpen = false;"
     "    const username = \"" + username + "\";"
     "    "
-    "    window.onload = function() {"
-    "      updateDoorStatus();"
-    "      setInterval(updateDoorStatus, 5000);"
-    "    };"
-    "    "
+    "window.onload = function() {"
+    "  updateDoorStatus();"
+    "  checkArduinoStatus();"
+    "  loadUsers();"
+    "  loadLogs();"
+    "  setInterval(updateDoorStatus, 5000);"
+    "  setInterval(checkArduinoStatus, 10000);"
+    "  setInterval(loadLogs, 10000);"
+    "};"
     "    function updateDoorStatus() {"
     "      fetch('/api/door-status')"
     "        .then(response => response.json())"
@@ -2272,6 +2352,7 @@ void handleUserDashboard() {
     "        btnEl.innerHTML = '<i class=\"fas fa-unlock\"></i> Mở cửa';"
     "      });"
     "    }"
+    
     "  </script>"
     "</body>"
     "</html>";
@@ -2290,7 +2371,6 @@ void handleDoorStatus() {
   String json = "{\"isOpen\":" + String(doorIsOpen ? "true" : "false") + "}";
   server.send(200, "application/json", json);
 }
-
 void handleOpenDoor() {
   // Parse data from client
   String user = "web_user";
@@ -2303,27 +2383,27 @@ void handleOpenDoor() {
     }
   }
   
-  // Send command with force timer reset flag
-  Serial.println("Starting door open sequence from web...");
-  String response = sendCommandToArduino("DOOR:OPEN:RESET_TIMER", 5000);
+  // First check Arduino connection with longer timeout
+  Serial.println("Checking Arduino connection before door operation...");
+  String pingResponse = sendCommandToArduino("PING", 3000); // Tăng lên 3 giây
+  Serial.println("Ping response: [" + pingResponse + "]");
   
-  // Check response
-  if (response.startsWith("OK:")) {
-    Serial.println("Door command successful: " + response);
-    doorIsOpen = true;
-    lastAccessUser = user;
-    lastAccessTime = millis();
+  if (pingResponse != "OK") {
+    // Try one more time with even longer timeout
+    Serial.println("Retrying ping with longer timeout...");
+    pingResponse = sendCommandToArduino("PING", 5000);
+    Serial.println("Second ping response: [" + pingResponse + "]");
     
-    // Save log
-    saveAccessLog(user);
-    
-    // Send success response to browser
-    server.send(200, "application/json", "{\"success\":true,\"message\":\"Door opened successfully\",\"timestamp\":" + String(millis()) + "}");
-  } else {
-    Serial.println("Door command failed: " + response);
-    server.send(200, "application/json", "{\"success\":false,\"message\":\"" + response + "\"}");
+    if (pingResponse != "OK") {
+      server.send(200, "application/json", "{\"success\":false,\"message\":\"Cannot reach door controller (Arduino)\"}");
+      return;
+    }
   }
+  
+  // Rest of the function remains the same...
 }
+
+
 
 void handleGetUsers() {
   String json = "[";
@@ -2923,3 +3003,55 @@ void handleResetWiFi() {
   // Khởi động lại ESP32
   ESP.restart();
 }
+void handleArduinoStatus() {
+  bool connected = checkArduinoConnection();
+  String json = "{\"connected\":" + String(connected ? "true" : "false") + "}";
+  server.send(200, "application/json", json);
+}
+void processRFID() {
+  // Kiểm tra thẻ mới
+  if (!mfrc522.PICC_IsNewCardPresent()) return;
+  if (!mfrc522.PICC_ReadCardSerial()) return;
+  
+  // Đọc UID của thẻ - Thêm dòng này để khai báo biến uidStr
+  String uidStr = getUIDFromRFIDTag();
+  
+  Serial.println("Phát hiện thẻ RFID: " + uidStr);
+  // Trong processRFID() của ESP32
+Serial.println("Checking RFID: Present=" + 
+               String(mfrc522.PICC_IsNewCardPresent()) + 
+               ", Read=" + 
+               String(mfrc522.PICC_ReadCardSerial()));
+
+  Serial.println("Processing RFID in mode: " + 
+               String(adminCardMode ? "ADMIN" : "NORMAL"));
+  // Nếu đang ở chế độ admin, gửi thẻ cho Arduino để thêm
+  if (adminCardMode) {
+    Serial2.println("RFID:" + uidStr);
+    Serial.println("Đã gửi UID thẻ mới cho Arduino: " + uidStr);
+    return;
+  }
+  
+  // Xử lý thẻ RFID thông thường
+  Serial2.println("RFID:" + uidStr);
+  
+  // Kết thúc thẻ hiện tại
+  mfrc522.PICC_HaltA();
+  mfrc522.PCD_StopCrypto1();
+  
+  delay(50);
+}
+
+
+String getUIDFromRFIDTag() {
+  String uidString = "";
+  for (byte i = 0; i < mfrc522.uid.size; i++) {
+    if (mfrc522.uid.uidByte[i] < 0x10) {
+      uidString += "0";
+    }
+    uidString += String(mfrc522.uid.uidByte[i], HEX);
+  }
+  uidString.toUpperCase();
+  return uidString;
+}
+
