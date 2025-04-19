@@ -184,19 +184,6 @@ void setup() {
   mfrc522.PCD_Init();
   delay(100);
 
-  // Kiểm tra xem đầu đọc RFID có hoạt động không
-  byte v = mfrc522.PCD_ReadRegister(mfrc522.VersionReg);
-  if (v == 0x00 || v == 0xFF) {
-    Serial.println(F("WARNING: RFID reader not working properly!"));
-    lcd.clear();
-    lcd.print(F("RFID Error!"));
-    lcd.setCursor(0, 1);
-    lcd.print(F("Check wiring"));
-    delay(2000);
-  } else {
-    Serial.print(F("RFID reader found. Version: 0x"));
-    Serial.println(v, HEX);
-  }
   
   // Thiết lập cảm biến vân tay
   finger.begin(57600);
