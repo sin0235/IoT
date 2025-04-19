@@ -50,7 +50,6 @@
 #define USER_TYPE_FINGERPRINT 1
 #define USER_TYPE_RFID        2
 #define USER_TYPE_PIN         3
-#define MAX_RETRIES 3
 
 // User record structure - added 'active' field to support user deletion
 struct UserRecord {
@@ -213,7 +212,7 @@ void setup() {
   
   // Cấu hình relay, buzzer và nút mở cửa
   pinMode(PIN_RELAY, OUTPUT);
-
+  digitalWrite(PIN_RELAY, LOW);
   
   pinMode(PIN_BUZZER, OUTPUT);
   digitalWrite(PIN_BUZZER, LOW);
@@ -593,17 +592,14 @@ void openDoor(const char* method) {
   // Ghi log sự kiện truy cập
   Serial.print(F("EVENT:ACCESS_GRANTED,"));
   Serial.println(method);
-    digitalWrite(PIN_RELAY, HIGH);
-    delay(300);
+  
   // Kích hoạt servo một cách đáng tin cậy
   doorServo.attach(PIN_SERVO);
   delay(50); // Đợi servo khởi động
   
   // Mở khóa cửa với góc mở phù hợp (điều chỉnh nếu cần)
   doorServo.write(110);
-  delay(100);
-  doorServo.detach();
-
+  digitalWrite(PIN_RELAY, HIGH);
   
   // Cập nhật trạng thái
   doorOpen = true;
@@ -622,20 +618,20 @@ void openDoor(const char* method) {
 void lockDoor() {
   // Đảm bảo servo được kết nối
   doorServo.attach(PIN_SERVO);
-  delay(50);  // Đợi servo khởi động
+  delay(50); // Đợi servo khởi động
+
   
   // Đảm bảo vị trí cuối cùng chính xác
   doorServo.write(0);
-  delay(50);
-    doorServo.detach();
-  delay(500);
+  delay(200);
   
   // Tắt relay
   digitalWrite(PIN_RELAY, LOW);
   doorOpen = false;
   
   // Ngắt kết nối servo để tiết kiệm năng lượng và giảm rung
-
+  delay(500); // Đợi servo ổn định
+  doorServo.detach();
   
   // Gửi xác nhận trạng thái
   Serial.println(F("STATUS:CLOSED"));
@@ -643,6 +639,8 @@ void lockDoor() {
   
   showIdleScreen();
 }
+
+
 /*********************** LCD INTERFACE **************************/
 void setupLCD() {
   lcd.init();
