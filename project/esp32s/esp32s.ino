@@ -1,3 +1,4 @@
+
 /**
  * He Thong Quan Ly Cua Thong Minh - ESP32S
  * Ket noi voi Arduino Uno qua giao tiep UART va module chuyen doi muc logic
@@ -3075,4 +3076,3 @@ String getUIDFromRFIDTag() {
   uidString.toUpperCase();
   return uidString;
 }
-
