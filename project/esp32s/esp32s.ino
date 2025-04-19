@@ -2182,7 +2182,6 @@ void handleDeleteUser() {
   }
 }
 
-// Enhanced handleGetLogs function in ESP32 code
 void handleGetLogs() {
   preferences.begin("doorlogs", true); // Read-only mode
   int logCount = preferences.getInt("logCount", 0);
