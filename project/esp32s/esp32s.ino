@@ -187,6 +187,20 @@ void loop() {
   if(Serial2.available()) {
     checkArduinoResponse();
   }
+
+  static unsigned long lastStatusCheck = 0;
+  if (millis() - lastStatusCheck > 3000) { // Every 3 seconds
+    String status = sendCommandToArduino("STATUS", 1000);
+    if (status.startsWith("STATUS:")) {
+      bool newDoorState = (status.substring(7) == "OPEN");
+      if (doorIsOpen != newDoorState) {
+        Serial.println("Correcting door state mismatch");
+        doorIsOpen = newDoorState;
+      }
+    }
+    lastStatusCheck = millis();
+  }
+
   
   // Kiểm tra các cập nhật trạng thái từ Arduino
   if(serialBuffer.indexOf("STATUS:") >= 0) {
@@ -272,21 +286,28 @@ void handleArduinoEvent(String eventData) {
 void saveAccessLog(String method) {
   preferences.begin("doorlogs", false);
   
+  // Get current count and handle rollover
   int logCount = preferences.getInt("logCount", 0);
-  if(logCount >= 50) logCount = 0; // Giới hạn 50 bản ghi
+  if(logCount >= 50) logCount = 0; // Use circular buffer approach
   
-  // Tạo timestamp
+  // Create timestamp (using real time if available)
   String timeStr = String(millis());
   
-  // Lưu log
+  // Create structured log entry
   String logKey = "log" + String(logCount);
   String logValue = timeStr + "|" + method + "|" + "Mo cua";
+  
+  // Debug
+  Serial.print("Saving log: ");
+  Serial.println(logValue);
+  
+  // Store log and increment counter
   preferences.putString(logKey.c_str(), logValue.c_str());
   preferences.putInt("logCount", logCount + 1);
   
+  // Ensure data is committed
   preferences.end();
 }
-
 
 // ===== KET NOI WIFI =====
 void connectToWiFi() {
@@ -319,21 +340,22 @@ bool checkArduinoConnection() {
 }
 
 // Gui lenh den Arduino va doi phan hoi
+
 String sendCommandToArduino(String command, unsigned long timeout) {
-  // Reset các biến trạng thái
+  // Reset status variables
   lastResponse = "";
   responseReceived = false;
   
-  // Xóa bộ đệm Serial2 trước khi gửi lệnh
+  // Clear input buffer before sending command
   while (Serial2.available()) {
     Serial2.read();
   }
   
-  // Gửi lệnh
-  Serial.println("Gui den Arduino: " + command);
+  // Send command with clear logging
+  Serial.println("Sending to Arduino: " + command);
   Serial2.println(command);
   
-  // Đợi phản hồi với timeout
+  // Wait with proper timeout handling
   unsigned long startTime = millis();
   while (!responseReceived && (millis() - startTime < timeout)) {
     checkArduinoResponse();
@@ -343,7 +365,7 @@ String sendCommandToArduino(String command, unsigned long timeout) {
   if (responseReceived) {
     return lastResponse;
   } else {
-    Serial.println("Timeout khi gửi lệnh: " + command);
+    Serial.println("Timeout when sending command: " + command);
     return "TIMEOUT";
   }
 }
@@ -2054,7 +2076,7 @@ void handleDoorStatus() {
 }
 
 void handleOpenDoor() {
-  // Parse dữ liệu từ client
+  // Parse user data from client
   String user = "web_user";
   if (server.hasArg("plain")) {
     DynamicJsonDocument doc(200);
@@ -2065,31 +2087,23 @@ void handleOpenDoor() {
     }
   }
   
-  // Gửi lệnh mở cửa đến Arduino với timeout dài hơn
-  String response = sendCommandToArduino("DOOR:OPEN", 5000);  // 5 giây timeout
+  // Send door open command with explicit reset timer instruction
+  String response = sendCommandToArduino("DOOR:OPEN:RESET_TIMER", 5000);
   
   if (response.startsWith("OK:")) {
     doorIsOpen = true;
     lastAccessUser = user;
     lastAccessTime = millis();
     
-    // Lưu log
-    preferences.begin("doorlogs", false);
-    int logCount = preferences.getInt("logCount", 0);
-    if (logCount >= 50) logCount = 0;
+    // Save log
+    saveAccessLog(user);
     
-    String timeStr = String(millis());
-    String logKey = "log" + String(logCount);
-    String logValue = timeStr + "|" + user + "|Mo cua";
-    preferences.putString(logKey.c_str(), logValue.c_str());
-    preferences.putInt("logCount", logCount + 1);
-    preferences.end();
-    
-    server.send(200, "application/json", "{\"success\":true,\"message\":\"" + response + "\"}");
+    server.send(200, "application/json", "{\"success\":true,\"message\":\"Door opened successfully\"}");
   } else {
     server.send(200, "application/json", "{\"success\":false,\"message\":\"" + response + "\"}");
   }
 }
+
 
 void handleGetUsers() {
   String json = "[";
@@ -2158,33 +2172,49 @@ void handleDeleteUser() {
   }
 }
 
+// Enhanced handleGetLogs function in ESP32 code
 void handleGetLogs() {
-  preferences.begin("doorlogs", true);
+  preferences.begin("doorlogs", true); // Read-only mode
   int logCount = preferences.getInt("logCount", 0);
+  
+  // Debug information
+  Serial.print("Total logs: ");
+  Serial.println(logCount);
   
   String json = "[";
   bool firstItem = true;
   
-  // Lay 20 ban ghi moi nhat
-  for(int i = logCount - 1; i >= 0 && i >= logCount - 20; i--) {
-    int index = i;
-    if(i < 0) index += 50; // Quay vong cho log
-    
-    String logKey = "log" + String(index);
+  // Get most recent logs first (up to 20)
+  int startIdx = (logCount == 0) ? 49 : (logCount - 1); // Handle empty case
+  int endIdx = startIdx - 20;
+  if (endIdx < 0) endIdx = -1;
+  
+  for (int i = startIdx; i > endIdx; i--) {
+    int idx = i % 50; // Handle circular buffer wraparound
+    String logKey = "log" + String(idx);
     String logValue = preferences.getString(logKey.c_str(), "");
     
-    if(logValue.length() > 0) {
-      // Phan tich dinh dang: time|user|action
+    // Debug
+    Serial.print("Reading log ");
+    Serial.print(logKey);
+    Serial.print(": ");
+    Serial.println(logValue);
+    
+    if (logValue.length() > 0) {
+      // Process log entry
       int delimPos1 = logValue.indexOf('|');
       int delimPos2 = logValue.indexOf('|', delimPos1 + 1);
       
-      if(delimPos1 > 0 && delimPos2 > delimPos1) {
-        if(!firstItem) json += ",";
+      if (delimPos1 > 0 && delimPos2 > delimPos1) {
+        if (!firstItem) json += ",";
+        
+        // Parse log components
         String time = logValue.substring(0, delimPos1);
         String user = logValue.substring(delimPos1 + 1, delimPos2);
         String action = logValue.substring(delimPos2 + 1);
         
-        json += "{\"time\":\"" + time + "\",";
+        // Format for display
+        json += "{\"time\":\"" + formatTimeFromMillis(time.toInt()) + "\",";
         json += "\"user\":\"" + user + "\",";
         json += "\"action\":\"" + action + "\"}";
         
@@ -2198,3 +2228,16 @@ void handleGetLogs() {
   
   server.send(200, "application/json", json);
 }
+
+// Helper function to format time
+String formatTimeFromMillis(unsigned long ms) {
+  unsigned long seconds = ms / 1000;
+  unsigned long minutes = seconds / 60;
+  unsigned long hours = minutes / 60;
+  
+  // Format as HH:MM:SS
+  return String(hours % 24) + ":" + 
+         (minutes % 60 < 10 ? "0" : "") + String(minutes % 60) + ":" + 
+         (seconds % 60 < 10 ? "0" : "") + String(seconds % 60);
+}
+
