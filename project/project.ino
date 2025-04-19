@@ -623,7 +623,7 @@ void openDoor(const char* method) {
   
   // Activate hardware
   digitalWrite(PIN_RELAY, HIGH);
-  delay(300);
+  delay(500);
   
   // Control servo with proper timing
   doorServo.attach(PIN_SERVO);
