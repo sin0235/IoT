@@ -430,44 +430,51 @@ bool checkArduinoConnection() {
 }
 
 // Gui lenh den Arduino va doi phan h
-String sendCommandToArduino(String command, long unsigned int timeout ) {
-  // Reset biến trạng thái
+String sendCommandToArduino(String command, long unsigned int timeout) {
+  // Reset variables
   lastResponse = "";
   responseReceived = false;
   
-  // Xóa bộ đệm trước khi gửi lệnh
+  // Clear buffer
   while (Serial2.available()) {
     Serial2.read();
   }
   
-  // Đảm bảo Serial2 được khởi tạo
-  if (!Serial2) {
-    Serial.println("ERROR: Serial2 not initialized!");
-    return "ERROR";
-  }
-  
-  // Gửi lệnh với log rõ ràng
+  // Send command with clear termination
   Serial.println("Sending to Arduino: " + command);
   Serial2.println(command);
-  Serial2.flush(); // Đảm bảo lệnh được gửi hoàn toàn
+  Serial2.flush();
   
-  // Đợi với xử lý timeout thích hợp
+  // Improved waiting logic with progressive checking
   unsigned long startTime = millis();
+  unsigned long lastCheckTime = startTime;
+  int retryInterval = 50; // Check more frequently initially
+  
   while (!responseReceived && (millis() - startTime < timeout)) {
-    if (Serial2.available()) {
+    if (Serial2.available() > 0) {
       checkArduinoResponse();
     }
-    delay(5);
+    
+    // Progressive delay strategy
+    unsigned long currentTime = millis();
+    if (currentTime - lastCheckTime >= retryInterval) {
+      lastCheckTime = currentTime;
+      // Increase interval over time for better efficiency
+      if (retryInterval < 100) retryInterval += 10;
+    }
+    
+    delay(5); // Short delay to prevent CPU overload
   }
   
   if (responseReceived) {
-    Serial.println("Received response: " + lastResponse);
+    Serial.println("Received response: [" + lastResponse + "]");
     return lastResponse;
   } else {
     Serial.println("Timeout when sending command: " + command);
     return "TIMEOUT";
   }
 }
+
 
 
 // Kiem tra phan hoi tu Arduino
@@ -1717,7 +1724,7 @@ void handleAdminPanel() {
     "    })"
     "    .catch(error => {"
     "      console.error('Error toggling door:', error);"
-    "      showAlert('Lỗi kết nối server', 'danger');"
+    "      showAlert('Something's wrong!', 'danger');"
     "      updateDoorStatus();"
     "    });"
     "}"
@@ -2383,13 +2390,13 @@ void handleOpenDoor() {
     }
   }
   
-  // First check Arduino connection with longer timeout
+  // Check Arduino connection with longer timeout
   Serial.println("Checking Arduino connection before door operation...");
-  String pingResponse = sendCommandToArduino("PING", 3000); // Tăng lên 3 giây
+  String pingResponse = sendCommandToArduino("PING", 3000);
   Serial.println("Ping response: [" + pingResponse + "]");
   
   if (pingResponse != "OK") {
-    // Try one more time with even longer timeout
+    // Try one more time with longer timeout
     Serial.println("Retrying ping with longer timeout...");
     pingResponse = sendCommandToArduino("PING", 5000);
     Serial.println("Second ping response: [" + pingResponse + "]");
@@ -2400,8 +2407,22 @@ void handleOpenDoor() {
     }
   }
   
-  // Rest of the function remains the same...
+  // Send actual door open command
+  String response = sendCommandToArduino("DOOR:OPEN", 5000);
+  
+  if (response.startsWith("OK:")) {
+    // Update door state
+    doorIsOpen = true;
+    lastAccessUser = user;
+    lastAccessTime = millis();
+    
+    // Save log
+    saveAccessLog(user);
+    
+    server.send(200, "application/json", "{\"success\":true,\"message\":\"Door opened successfully\"}");
+  } 
 }
+
 
 
 
