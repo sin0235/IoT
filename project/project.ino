@@ -1858,6 +1858,44 @@ void processRemoteCommand() {
       Serial.print(F(",USERS="));
       Serial.println(getUserCount());
     }
+    else if (cmd.startsWith("RFID:")) {
+  // Extract the RFID UID from the command
+  String uidStr = cmd.substring(5);
+  Serial.print(F("Received RFID UID from ESP32: "));
+  Serial.println(uidStr);
+  
+  // Check if RFID is valid
+  if (authenticateUser(USER_TYPE_RFID, uidStr.c_str())) {
+    Serial.println(F("RFID Authentication successful"));
+    lcd.clear();
+    lcd.write(3); // Card icon
+    lcd.print(F(" RFID Valid"));
+    lcd.setCursor(0, 1);
+    lcd.print(F("Access Granted"));
+    
+    // Open the door
+    openDoor("ESP32_RFID");
+    Serial.print(F("OK:RFID_VALID,"));
+    Serial.println(uidStr);
+  } else {
+    Serial.println(F("RFID Authentication failed"));
+    lcd.clear();
+    lcd.write(3); // Card icon
+    lcd.print(F(" RFID Invalid"));
+    lcd.setCursor(0, 1);
+    lcd.print(F("Access Denied"));
+    
+    beepError();
+    delay(MEDIUM_DELAY);
+    
+    // Return to idle
+    currentState = STATE_IDLE;
+    showIdleScreen();
+    
+    Serial.print(F("ERR:RFID_INVALID,"));
+    Serial.println(uidStr);
+  }
+}
     
     // Unknown command
     else {

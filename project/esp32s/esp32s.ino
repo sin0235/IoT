@@ -3032,37 +3032,50 @@ void handleArduinoStatus() {
   server.send(200, "application/json", json);
 }
 void processRFID() {
-  // Kiểm tra thẻ mới
+  // Check for new card
   if (!mfrc522.PICC_IsNewCardPresent()) return;
   if (!mfrc522.PICC_ReadCardSerial()) return;
   
-  // Đọc UID của thẻ - Thêm dòng này để khai báo biến uidStr
+  // Get UID string
   String uidStr = getUIDFromRFIDTag();
   
-  Serial.println("Phát hiện thẻ RFID: " + uidStr);
-  // Trong processRFID() của ESP32
-Serial.println("Checking RFID: Present=" + 
-               String(mfrc522.PICC_IsNewCardPresent()) + 
-               ", Read=" + 
-               String(mfrc522.PICC_ReadCardSerial()));
-
-  Serial.println("Processing RFID in mode: " + 
-               String(adminCardMode ? "ADMIN" : "NORMAL"));
-  // Nếu đang ở chế độ admin, gửi thẻ cho Arduino để thêm
+  Serial.println("RFID detected: " + uidStr);
+  
+  // Handle different modes
   if (adminCardMode) {
-    Serial2.println("RFID:" + uidStr);
-    Serial.println("Đã gửi UID thẻ mới cho Arduino: " + uidStr);
+    Serial.println("Admin mode - sending RFID for registration");
+    Serial2.println("ADMIN_RFID:" + uidStr);
     return;
   }
   
-  // Xử lý thẻ RFID thông thường
+  // Normal mode - try to authenticate
+  Serial.println("Normal mode - sending RFID for authentication");
   Serial2.println("RFID:" + uidStr);
   
-  // Kết thúc thẻ hiện tại
+  // Wait for response from Arduino
+  unsigned long startTime = millis();
+  bool responseReceived = false;
+  String response = "";
+  
+  while (millis() - startTime < 3000 && !responseReceived) {
+    if (Serial2.available()) {
+      response = Serial2.readStringUntil('\n');
+      response.trim();
+      responseReceived = true;
+    }
+    delay(10);
+  }
+  
+  // Log response
+  if (responseReceived) {
+    Serial.println("Arduino response: " + response);
+  } else {
+    Serial.println("No response from Arduino - timeout");
+  }
+  
+  // Halt RFID
   mfrc522.PICC_HaltA();
   mfrc522.PCD_StopCrypto1();
-  
-  delay(50);
 }
 
 
