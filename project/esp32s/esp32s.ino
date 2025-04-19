@@ -1,4 +1,3 @@
-
 /**
  * He Thong Quan Ly Cua Thong Minh - ESP32S
  * Ket noi voi Arduino Uno qua giao tiep UART va module chuyen doi muc logic
@@ -1725,7 +1724,7 @@ void handleAdminPanel() {
     "    })"
     "    .catch(error => {"
     "      console.error('Error toggling door:', error);"
-    "      showAlert('Something's wrong!', 'danger');"
+    "      showAlert('Lỗi kết nối server', 'danger');"
     "      updateDoorStatus();"
     "    });"
     "}"
@@ -2421,7 +2420,9 @@ void handleOpenDoor() {
     saveAccessLog(user);
     
     server.send(200, "application/json", "{\"success\":true,\"message\":\"Door opened successfully\"}");
-  } 
+  } else {
+    server.send(200, "application/json", "{\"success\":false,\"message\":\"Failed to open door: " + response + "\"}");
+  }
 }
 
 
@@ -3076,3 +3077,4 @@ String getUIDFromRFIDTag() {
   uidString.toUpperCase();
   return uidString;
 }
+
