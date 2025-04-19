@@ -12,8 +12,13 @@
 #include <Update.h>
 
 // ===== CAU HINH WIFI =====
-const char* ssid = "Wi-MESH 2.4G";     
-const char* password = "25032005"; 
+const char* Ssid = "Wi-MESH 2.4G";     
+const char* Password = "25032005"; 
+
+bool APMode = false;
+const char* AP_SSID = "SmartDoor";
+const char* AP_PASSWORD = "12345678";
+
 
 // ===== CAU HINH UART =====
 #define ARDUINO_BAUD_RATE 9600
@@ -53,8 +58,13 @@ bool authenticateUser(String username, String password);
 bool isAdmin(String username);
 bool addUser(String username, String password, bool isAdmin);
 bool deleteUser(String username);
-void connectToWiFi();
+bool connectToWiFi(String ssid, String password, int timeout = 20);
 void setupServerRoutes();
+void setupWiFiConfigRoutes();
+void setupAP();
+void saveWiFiConfig(String ssid, String password);
+bool loadWiFiConfig();
+void clearWiFiConfig();
 void handleRoot();
 void handleLogin();
 void handleAdminPanel();
@@ -65,45 +75,48 @@ void handleGetUsers();
 void handleAddUser();
 void handleDeleteUser();
 void handleGetLogs();
+void handleWiFiSetup();
+void handleWiFiScan();
+void handleSaveWiFi();
+void handleResetWiFi();
+void restart();
 
 // ===== KHOI TAO HE THONG =====
 void setup() {
   // Khởi tạo cổng Serial để debug
   Serial.begin(115200);
-  Serial.println("\n\n=== He Thong Quan Ly Cua Thong Minh ===");
+  Serial.println("\n\n=== Hệ Thống Quản Lý Cửa Thông Minh ===");
   
   // Khởi tạo cổng Serial2 để giao tiếp với Arduino
-  Serial2.begin(ARDUINO_BAUD_RATE, SERIAL_8N1, 16, 17);  // RX=GPIO16, TX=GPIO17
-  Serial.println("Da khoi tao ket noi voi Arduino qua Serial2");
+  Serial2.begin(ARDUINO_BAUD_RATE, SERIAL_8N1, 16, 17);
+  Serial.println("Đã khởi tạo kết nối với Arduino qua Serial2");
   
   // Khởi tạo SPIFFS
   if(!SPIFFS.begin(true)) {
-    Serial.println("Loi khoi tao SPIFFS");
+    Serial.println("Lỗi khởi tạo SPIFFS");
   } else {
-    Serial.println("SPIFFS da khoi tao thanh cong");
-  }
-  
-  // Ket nối WiFi
-  connectToWiFi();
-  
-  // Thiết lập mDNS
-  if(MDNS.begin("smartdoor")) {
-    Serial.println("mDNS da khoi dong - Truy cap qua http://smartdoor.local");
-  } else {
-    Serial.println("Khong the khoi dong mDNS");
+    Serial.println("SPIFFS đã khởi tạo thành công");
   }
   
   // Tải danh sách người dùng
   loadUsers();
-  Serial.println("Da tai danh sach nguoi dung");
+  Serial.println("Đã tải danh sách người dùng");
+  
+  // Thử kết nối WiFi từ cấu hình đã lưu
+  if (!loadWiFiConfig()) {
+    Serial.println("Không có cấu hình WiFi hoặc không thể kết nối, chuyển sang chế độ AP");
+    setupAP();
+  }
   
   // Thiết lập các routes cho web server
   setupServerRoutes();
-  Serial.println("Da thiet lap cac routes cho web server");
+  setupWiFiConfigRoutes(); // Thêm routes cho cấu hình WiFi
+  Serial.println("Đã thiết lập các routes cho web server");
   
   // Khởi động server
   server.begin();
-  Serial.println("May chu HTTP da khoi dong");
+  Serial.println("Máy chủ HTTP đã khởi động");
+  
   
   // Làm sạch buffer Serial2 trước khi kiểm tra kết nối
   while(Serial2.available()) {
@@ -118,7 +131,7 @@ void setup() {
   
   // Gửi lệnh PING kiểm tra kết nối
   bool arduinoConnected = false;
-  int maxAttempts = 5;
+  int maxAttempts = 3;
   
   for(int attempt = 1; attempt <= maxAttempts; attempt++) {
     Serial.print("Lan thu ");
@@ -173,9 +186,16 @@ void setup() {
     }
   }
   
-  // Khởi tạo bảng điều khiển cửa
+  // Hiển thị thông tin trạng thái hệ thống
   Serial.println("He thong Quan ly Cua Thong Minh da san sang!");
-  Serial.println("Su dung trinh duyet de truy cap: http://" + WiFi.localIP().toString());
+  if (APMode) {
+    Serial.println("Chế độ AP - SSID: " + String(AP_SSID) + ", Password: " + String(AP_PASSWORD));
+    Serial.println("IP AP: " + WiFi.softAPIP().toString());
+  } else {
+    Serial.println("Chế độ STA - Đã kết nối WiFi: " + WiFi.SSID());
+    Serial.println("IP: " + WiFi.localIP().toString());
+  }
+  Serial.println("Su dung trinh duyet de truy cap theo dia chi IP tren");
 }
 
 // ===== VONG LAP CHINH =====
@@ -228,8 +248,6 @@ void loop() {
       
       // Ghi lại log từ Arduino
       Serial.println("Log tu Arduino: " + logMessage);
-      
-      // Đây là nơi bạn có thể lưu log vào bộ nhớ nếu cần
     }
   }
   
@@ -257,8 +275,25 @@ void loop() {
     lastPingTime = millis();
   }
   
+  // Kiểm tra kết nối WiFi định kỳ (nếu trong chế độ STA)
+  static unsigned long lastWiFiCheckTime = 0;
+  if (!APMode && millis() - lastWiFiCheckTime > 60000) { // Kiểm tra mỗi phút
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("Phát hiện mất kết nối WiFi, đang thử kết nối lại...");
+      WiFi.reconnect();
+    }
+    lastWiFiCheckTime = millis();
+  }
+  
   // Giảm tải CPU
   delay(10);
+}
+
+// Hàm khởi động lại ESP32
+void restart() {
+  Serial.println("Khởi động lại ESP32...");
+  delay(1000);
+  ESP.restart();
 }
 
 // Hàm xử lý sự kiện từ Arduino
@@ -314,27 +349,43 @@ void saveAccessLog(String method) {
 
 
 // ===== KET NOI WIFI =====
-void connectToWiFi() {
-  Serial.print("Dang ket noi WiFi...");
-  WiFi.begin(ssid);
+bool connectToWiFi(String ssid, String password, int timeout) {
+  // Thoát khỏi chế độ AP nếu đang bật
+  if(APMode) {
+    WiFi.softAPdisconnect(true);
+    delay(500);
+  }
+  
+  // Thiết lập chế độ Station
+  WiFi.mode(WIFI_STA);
+  APMode = false;
+  
+  Serial.print("Đang kết nối WiFi với SSID: ");
+  Serial.println(ssid);
+  
+  // Bắt đầu kết nối với mạng WiFi đã cấu hình
+  WiFi.begin(ssid.c_str(), password.c_str());
   
   int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+  while (WiFi.status() != WL_CONNECTED && attempts < timeout) {
     delay(500);
     Serial.print(".");
     attempts++;
   }
   
   if(WiFi.status() == WL_CONNECTED) {
-    Serial.println("\nDa ket noi WiFi");
-    Serial.println("Dia chi IP: " + WiFi.localIP().toString());
-
-
+    Serial.println("\nĐã kết nối WiFi");
+    Serial.println("Địa chỉ IP: " + WiFi.localIP().toString());
+    
+    // Thiết lập MDNS trong chế độ STA
+    if(MDNS.begin("smartdoor")) {
+      Serial.println("mDNS đã khởi động - Truy cập qua http://smartdoor.local");
+    }
+    
+    return true;
   } else {
-    Serial.println("\nKhong the ket noi WiFi");
-    Serial.println(ssid);
-    Serial.println(password);
-    // Van tiep tuc hoat dong ngay ca khi khong co WiFi
+    Serial.println("\nKhông thể kết nối WiFi");
+    return false;
   }
 }
 
@@ -344,7 +395,6 @@ bool checkArduinoConnection() {
 }
 
 // Gui lenh den Arduino va doi phan hoi
-
 String sendCommandToArduino(String command, unsigned long timeout) {
   // Reset status variables
   lastResponse = "";
@@ -553,7 +603,107 @@ void setupServerRoutes() {
   });
 }
 
-// ===== XU LY HTTP ENDPOINTS =====
+// Thiết lập các routes cho cấu hình WiFi
+void setupWiFiConfigRoutes() {
+  // Trang cấu hình WiFi
+  server.on("/wifi-setup", HTTP_GET, handleWiFiSetup);
+  
+  // Quét mạng WiFi
+  server.on("/api/scan-wifi", HTTP_GET, handleWiFiScan);
+  
+  // Lưu cấu hình WiFi mới
+  server.on("/api/save-wifi", HTTP_POST, handleSaveWiFi);
+  
+  // Reset cấu hình WiFi
+  server.on("/api/reset-wifi", HTTP_POST, handleResetWiFi);
+}
+
+// ===== CHỨC NĂNG WIFI AP =====
+void setupAP() {
+  APMode = true;
+  
+  // Ngắt kết nối WiFi hiện tại một cách triệt để
+  WiFi.disconnect(true);
+  delay(100);
+  
+  // Thiết lập chế độ AP với reset hoàn toàn
+  WiFi.mode(WIFI_OFF);
+  delay(100);
+  WiFi.mode(WIFI_AP);
+  delay(100);
+  
+  // Cấu hình IP tĩnh cho AP để tránh xung đột
+  IPAddress local_IP(192,168,4,1);
+  IPAddress gateway(192,168,4,1);
+  IPAddress subnet(255,255,255,0);
+  
+  // Thiết lập cấu hình IP
+  if(!WiFi.softAPConfig(local_IP, gateway, subnet)) {
+    Serial.println("Cấu hình AP thất bại!");
+  }
+  
+  // Khởi tạo AP với các tham số chi tiết
+  // softAP(ssid, password, channel, hidden, max_connections)
+  if(WiFi.softAP(AP_SSID, AP_PASSWORD, 1, 0, 4)) {
+    Serial.println("WiFi AP đã được khởi tạo thành công!");
+    Serial.print("Tên mạng: ");
+    Serial.println(AP_SSID);
+    Serial.print("Mật khẩu: ");
+    Serial.println(AP_PASSWORD);
+    Serial.print("Địa chỉ IP của AP: ");
+    Serial.println(WiFi.softAPIP());
+    
+    // In thêm thông tin Debug
+    Serial.print("MAC AP: ");
+    Serial.println(WiFi.softAPmacAddress());
+  } else {
+    Serial.println("Lỗi khi khởi tạo WiFi AP!");
+  }
+  
+  // Thiết lập MDNS trong chế độ AP
+  if(MDNS.begin("smartdoor")) {
+    Serial.println("mDNS đã khởi động - Truy cập qua http://smartdoor.local");
+  }
+}
+
+
+// Lưu cấu hình WiFi
+void saveWiFiConfig(String ssid, String password) {
+  preferences.begin("wifi_config", false);
+  preferences.putString("ssid", ssid);
+  preferences.putString("password", password);
+  preferences.putBool("configured", true);
+  preferences.end();
+  Serial.println("Đã lưu cấu hình WiFi: SSID=" + ssid);
+}
+
+// Tải cấu hình WiFi đã lưu
+bool loadWiFiConfig() {
+  preferences.begin("wifi_config", true);
+  bool isConfigured = preferences.getBool("configured", false);
+  
+  if(isConfigured) {
+    String savedSSID = preferences.getString("ssid", "");
+    String savedPassword = preferences.getString("password", "");
+    preferences.end();
+    
+    Serial.println("Đã tải cấu hình WiFi: SSID=" + savedSSID);
+    return connectToWiFi(savedSSID, savedPassword);
+  }
+  
+  preferences.end();
+  return false;
+}
+
+// Xóa cấu hình WiFi
+void clearWiFiConfig() {
+  preferences.begin("wifi_config", false);
+  preferences.clear();
+  preferences.end();
+  Serial.println("Đã xóa cấu hình WiFi");
+}
+
+// Giữ nguyên tất cả các handler hiện có
 void handleRoot() {
   String html = "<!DOCTYPE html>"
     "<html lang=\"vi\">"
@@ -809,6 +959,15 @@ void handleRoot() {
     "    .delay-2 { animation-delay: 0.2s; }"
     "    .delay-3 { animation-delay: 0.3s; }"
     "    .delay-4 { animation-delay: 0.4s; }"
+    "    .wifi-setup-link {"
+    "      color: #3498db;"
+    "      display: flex;"
+    "      align-items: center;"
+    "      gap: 5px;"
+    "    }"
+    "    .wifi-setup-link i {"
+    "      font-size: 14px;"
+    "    }"
     "  </style>"
     "</head>"
     "<body>"
@@ -846,6 +1005,7 @@ void handleRoot() {
     "    <div class=\"login-footer animate-fade-in delay-4\">"
     "      <p>&copy; 2025 Smart Door Control System</p>"
     "      <div class=\"help-links\">"
+    "        <a href=\"/wifi-setup\" class=\"help-link wifi-setup-link\"><i class=\"fas fa-wifi\"></i> Cấu hình WiFi</a>"
     "        <a href=\"#\" onclick=\"forgotPassword(); return false;\" class=\"help-link\">Quên mật khẩu?</a>"
     "        <a href=\"#\" onclick=\"needHelp(); return false;\" class=\"help-link\">Cần trợ giúp?</a>"
     "      </div>"
@@ -1139,6 +1299,14 @@ void handleAdminPanel() {
     "      color: var(--primary-color);"
     "      font-weight: 600;"
     "    }"
+    "    .header-controls {"
+    "      display: flex;"
+    "      gap: 10px;"
+    "    }"
+    "    .wifi-btn {"
+    "      background-color: #3498db;"
+    "      color: white;"
+    "    }"
     "    .panel {"
     "      background-color: white;"
     "      border-radius: 10px;"
@@ -1333,6 +1501,9 @@ void handleAdminPanel() {
     "      table {"
     "        font-size: 14px;"
     "      }"
+    "      .header-controls {"
+    "        flex-direction: column;"
+    "      }"
     "    }"
     "  </style>"
     "</head>"
@@ -1340,9 +1511,11 @@ void handleAdminPanel() {
     "  <div class=\"container\">"
     "    <div class=\"header\">"
     "      <h1><i class=\"fas fa-shield-alt\"></i> Trang quản trị hệ thống</h1>"
-    "      <button onclick=\"window.location.href='/'\"><i class=\"fas fa-sign-out-alt\"></i> Đăng xuất</button>"
+    "      <div class=\"header-controls\">"
+    "        <button onclick=\"window.location.href='/wifi-setup'\" class=\"wifi-btn\"><i class=\"fas fa-wifi\"></i> Cấu hình WiFi</button>"
+    "        <button onclick=\"window.location.href='/'\"><i class=\"fas fa-sign-out-alt\"></i> Đăng xuất</button>"
+    "      </div>"
     "    </div>"
-    "    "
     "    <div class=\"panel\">"
     "      <h2><i class=\"fas fa-door-open\"></i> Điều khiển cửa</h2>"
     "      <div class=\"door-controls\">"
@@ -1669,7 +1842,7 @@ void handleAdminPanel() {
 void handleUserDashboard() {
   String username = server.arg("user");
   
-  // Kiem tra nguoi dung hop le
+  // Kiểm tra người dùng hợp lệ
   bool validUser = false;
   for(int i = 0; i < userCount; i++) {
     if(users[i].username == username && users[i].active) {
@@ -1746,7 +1919,7 @@ void handleUserDashboard() {
     "    .navbar .user {"
     "      display: flex;"
     "      align-items: center;"
-    "      gap: 12px;"
+    "      gap::12px;"
     "    }"
     "    .navbar .user-info {"
     "      display: flex;"
@@ -1791,6 +1964,26 @@ void handleUserDashboard() {
     "      background-color: var(--danger-light);"
     "      color: var(--danger-color);"
     "      border-color: var(--danger-color);"
+    "    }"
+    "    .wifi-btn {"
+    "      background-color: var(--primary-light);"
+    "      color: var(--primary-dark);"
+    "      border: 1px solid var(--primary-light);"
+    "      padding: 8px 15px;"
+    "      border-radius: 30px;"
+    "      cursor: pointer;"
+    "      font-size: 14px;"
+    "      font-weight: 500;"
+    "      display: flex;"
+    "      align-items: center;"
+    "      gap: 6px;"
+    "      transition: var(--transition);"
+    "      text-decoration: none;"
+    "      margin-right: 10px;"
+    "    }"
+    "    .wifi-btn:hover {"
+    "      background-color: var(--primary-color);"
+    "      color: white;"
     "    }"
     "    .page-content {"
     "      display: flex;"
@@ -1947,6 +2140,9 @@ void handleUserDashboard() {
     "      .card-body {"
     "        padding: 24px 16px;"
     "      }"
+    "      .navbar .user {"
+    "        gap: 6px;"
+    "      }"
     "    }"
     "  </style>"
     "</head>"
@@ -1956,6 +2152,10 @@ void handleUserDashboard() {
   html += "<div class='navbar'>"
     "  <h1><i class='fas fa-shield-alt'></i> Smart Door System</h1>"
     "  <div class='user'>"
+    "    <a href='/wifi-setup' class='wifi-btn'>"
+    "      <i class='fas fa-wifi'></i>"
+    "      <span>WiFi</span>"
+    "    </a>"
     "    <div class='user-info'>"
     "      <div class='user-icon'>" + username.substring(0, 1) + "</div>"
     "      <span class='username'>" + username + "</span>"
@@ -2067,6 +2267,7 @@ void handleUserDashboard() {
   
   server.send(200, "text/html", html);
 }
+
 void handleDoorStatus() {
   // Lay trang thai cua tu Arduino
   String response = sendCommandToArduino("STATUS");
@@ -2112,8 +2313,6 @@ void handleOpenDoor() {
     server.send(200, "application/json", "{\"success\":false,\"message\":\"" + response + "\"}");
   }
 }
-
-
 
 void handleGetUsers() {
   String json = "[";
@@ -2250,3 +2449,466 @@ String formatTimeFromMillis(unsigned long ms) {
          (seconds % 60 < 10 ? "0" : "") + String(seconds % 60);
 }
 
+// Handler trang cấu hình WiFi
+void handleWiFiSetup() {
+  // Trang cấu hình WiFi
+  String html = "<!DOCTYPE html>"
+    "<html lang=\"vi\">"
+    "<head>"
+    "  <meta charset=\"UTF-8\">"
+    "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">"
+    "  <title>Cấu Hình WiFi</title>"
+    "  <link rel=\"stylesheet\" href=\"https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css\">"
+    "  <style>"
+    "    :root {"
+    "      --primary: #4361ee;"
+    "      --success: #2ecc71;"
+    "      --warning: #f39c12;"
+    "      --danger: #e74c3c;"
+    "      --light: #f8f9fa;"
+    "      --dark: #343a40;"
+    "      --border-radius: 8px;"
+    "      --shadow: 0 4px 6px rgba(0, 0, 0, 0.1);"
+    "    }"
+    "    * {"
+    "      margin: 0;"
+    "      padding: 0;"
+    "      box-sizing: border-box;"
+    "    }"
+    "    body {"
+    "      font-family: 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;"
+    "      background-color: #f0f2f5;"
+    "      color: var(--dark);"
+    "      line-height: 1.6;"
+    "      padding: 20px;"
+    "    }"
+    "    .container {"
+    "      max-width: 600px;"
+    "      margin: 0 auto;"
+    "      padding: 20px;"
+    "    }"
+    "    .header {"
+    "      text-align: center;"
+    "      margin-bottom: 30px;"
+    "    }"
+    "    .header h1 {"
+    "      font-size: 28px;"
+    "      margin-bottom: 10px;"
+    "      color: var(--primary);"
+    "    }"
+    "    .panel {"
+    "      background-color: white;"
+    "      border-radius: var(--border-radius);"
+    "      box-shadow: var(--shadow);"
+    "      padding: 25px;"
+    "      margin-bottom: 20px;"
+    "    }"
+    "    .panel h2 {"
+    "      font-size: 20px;"
+    "      margin-bottom: 20px;"
+    "      padding-bottom: 10px;"
+    "      border-bottom: 1px solid #eee;"
+    "      display: flex;"
+    "      align-items: center;"
+    "    }"
+    "    .panel h2 i {"
+    "      margin-right: 10px;"
+    "      color: var(--primary);"
+    "    }"
+    "    .form-group {"
+    "      margin-bottom: 20px;"
+    "    }"
+    "    .form-group label {"
+    "      display: block;"
+    "      margin-bottom: 8px;"
+    "      font-weight: 500;"
+    "    }"
+    "    input, select {"
+    "      width: 100%;"
+    "      padding: 12px;"
+    "      border: 1px solid #ddd;"
+    "      border-radius: var(--border-radius);"
+    "      font-size: 16px;"
+    "    }"
+    "    input:focus, select:focus {"
+    "      outline: none;"
+    "      border-color: var(--primary);"
+    "      box-shadow: 0 0 0 3px rgba(67, 97, 238, 0.2);"
+    "    }"
+    "    button {"
+    "      background-color: var(--primary);"
+    "      color: white;"
+    "      border: none;"
+    "      padding: 12px 20px;"
+    "      border-radius: var(--border-radius);"
+    "      cursor: pointer;"
+    "      font-size: 16px;"
+    "      font-weight: 500;"
+    "      display: inline-flex;"
+    "      align-items: center;"
+    "      justify-content: center;"
+    "      transition: all 0.2s ease;"
+    "    }"
+    "    button i {"
+    "      margin-right: 8px;"
+    "    }"
+    "    button:hover {"
+    "      opacity: 0.9;"
+    "      transform: translateY(-2px);"
+    "    }"
+    "    button:active {"
+    "      transform: translateY(0);"
+    "    }"
+    "    button.secondary {"
+    "      background-color: #6c757d;"
+    "    }"
+    "    button.refresh {"
+    "      background-color: var(--success);"
+    "    }"
+    "    button.danger {"
+    "      background-color: var(--danger);"
+    "    }"
+    "    .wifi-list {"
+    "      margin-top: 15px;"
+    "      max-height: 300px;"
+    "      overflow-y: auto;"
+    "      border: 1px solid #ddd;"
+    "      border-radius: var(--border-radius);"
+    "    }"
+    "    .wifi-item {"
+    "      padding: 12px 15px;"
+    "      border-bottom: 1px solid #eee;"
+    "      cursor: pointer;"
+    "      display: flex;"
+    "      align-items: center;"
+    "      justify-content: space-between;"
+    "    }"
+    "    .wifi-item:last-child {"
+    "      border-bottom: none;"
+    "    }"
+    "    .wifi-item:hover {"
+    "      background-color: var(--light);"
+    "    }"
+    "    .wifi-name {"
+    "      font-weight: 500;"
+    "    }"
+    "    .wifi-signal {"
+    "      color: #6c757d;"
+    "      font-size: 14px;"
+    "    }"
+    "    .wifi-secure i {"
+    "      color: var(--success);"
+    "    }"
+    "    .wifi-open i {"
+    "      color: var(--warning);"
+    "    }"
+    "    .button-group {"
+    "      display: flex;"
+    "      gap: 10px;"
+    "      margin-top: 20px;"
+    "    }"
+    "    .status-badge {"
+    "      display: inline-block;"
+    "      padding: 5px 10px;"
+    "      border-radius: 20px;"
+    "      font-size: 14px;"
+    "      margin-top: 10px;"
+    "    }"
+    "    .status-connected {"
+    "      background-color: #d4edda;"
+    "      color: #155724;"
+    "    }"
+    "    .status-ap {"
+    "      background-color: #fff3cd;"
+    "      color: #856404;"
+    "    }"
+    "    .loader {"
+    "      display: inline-block;"
+    "      width: 20px;"
+    "      height: 20px;"
+    "      border: 3px solid rgba(0, 0, 0, 0.1);"
+    "      border-radius: 50%;"
+    "      border-top-color: var(--primary);"
+    "      animation: spin 1s ease-in-out infinite;"
+    "      margin-right: 10px;"
+    "    }"
+    "    @keyframes spin {"
+    "      to { transform: rotate(360deg); }"
+    "    }"
+    "    .hidden {"
+    "      display: none;"
+    "    }"
+    "    .info-box {"
+    "      background-color: #e3f2fd;"
+    "      border-left: 4px solid var(--primary);"
+    "      padding: 15px;"
+    "      margin-bottom: 20px;"
+    "      border-radius: 4px;"
+    "    }"
+    "    .info-box p {"
+    "      margin: 0;"
+    "      color: #0c5460;"
+    "    }"
+    "    @media (max-width: 768px) {"
+    "      .container {"
+    "        padding: 10px;"
+    "      }"
+    "      .button-group {"
+    "        flex-direction: column;"
+    "      }"
+    "      button {"
+    "        width: 100%;"
+    "      }"
+    "    }"
+    "  </style>"
+    "</head>"
+    "<body>"
+    "  <div class=\"container\">"
+    "    <div class=\"header\">"
+    "      <h1><i class=\"fas fa-wifi\"></i> Cấu Hình Kết Nối WiFi</h1>";
+
+  // Hiển thị thông tin trạng thái kết nối
+  if(APMode) {
+    html += "<div class=\"status-badge status-ap\"><i class=\"fas fa-broadcast-tower\"></i> Đang ở chế độ phát WiFi (AP Mode)</div>";
+  } else {
+    html += "<div class=\"status-badge status-connected\"><i class=\"fas fa-check-circle\"></i> Đã kết nối WiFi: " + String(WiFi.SSID()) + "</div>";
+  }
+  
+  html += "    </div>"
+    "    <div class=\"info-box\">"
+    "      <p><i class=\"fas fa-info-circle\"></i> Cấu hình WiFi để kết nối thiết bị với mạng Internet. Sau khi cấu hình thành công, thiết bị sẽ khởi động lại.</p>"
+    "    </div>"
+    "    <div class=\"panel\">"
+    "      <h2><i class=\"fas fa-search\"></i> Quét Tìm Mạng WiFi</h2>"
+    "      <button id=\"scanBtn\" class=\"refresh\" onclick=\"scanWiFi()\"><i class=\"fas fa-sync-alt\"></i> Quét Mạng WiFi</button>"
+    "      <div id=\"scanLoader\" class=\"hidden\">"
+    "        <div class=\"loader\"></div> Đang quét mạng..."
+    "      </div>"
+    "      <div id=\"wifiList\" class=\"wifi-list hidden\"></div>"
+    "    </div>"
+    "    <div class=\"panel\">"
+    "      <h2><i class=\"fas fa-cog\"></i> Cấu Hình Kết Nối</h2>"
+    "      <div class=\"form-group\">"
+    "        <label for=\"ssid\">Tên mạng WiFi (SSID)</label>"
+    "        <input type=\"text\" id=\"ssid\" placeholder=\"Nhập tên mạng WiFi\">"
+    "      </div>"
+    "      <div class=\"form-group\">"
+    "        <label for=\"password\">Mật khẩu WiFi</label>"
+    "        <input type=\"password\" id=\"password\" placeholder=\"Nhập mật khẩu WiFi\">"
+    "      </div>"
+    "      <div class=\"button-group\">"
+    "        <button id=\"saveBtn\" onclick=\"saveWiFi()\"><i class=\"fas fa-save\"></i> Lưu & Kết Nối</button>"
+    "        <button class=\"secondary\" onclick=\"window.location.href='/'\"><i class=\"fas fa-arrow-left\"></i> Quay Lại</button>";
+
+  // Chỉ hiển thị nút reset nếu đã có cấu hình WiFi
+  if(!APMode) {
+    html += "        <button class=\"danger\" onclick=\"resetWiFi()\"><i class=\"fas fa-trash\"></i> Xóa Cấu Hình</button>";
+  }
+  
+  html += "      </div>"
+    "    </div>"
+    "  </div>"
+    "  <script>"
+    "    function scanWiFi() {"
+    "      document.getElementById('scanBtn').disabled = true;"
+    "      document.getElementById('scanLoader').classList.remove('hidden');"
+    "      document.getElementById('wifiList').classList.add('hidden');"
+    "      "
+    "      fetch('/api/scan-wifi')"
+    "        .then(response => response.json())"
+    "        .then(data => {"
+    "          const wifiList = document.getElementById('wifiList');"
+    "          wifiList.innerHTML = '';"
+    "          "
+    "          if(data.length === 0) {"
+    "            wifiList.innerHTML = '<div class=\"wifi-item\">Không tìm thấy mạng WiFi nào</div>';"
+    "          } else {"
+    "            data.forEach(network => {"
+    "              const wifiItem = document.createElement('div');"
+    "              wifiItem.className = 'wifi-item';"
+    "              wifiItem.onclick = function() { selectWiFi(network.ssid); };"
+    "              "
+    "              const signalStrength = Math.min(Math.max(2 * (network.rssi + 100), 0), 100);"
+    "              let signalIcon = 'fa-wifi';"
+    "              if(signalStrength < 30) signalIcon = 'fa-signal-weak';"
+    "              else if(signalStrength < 70) signalIcon = 'fa-signal';"
+    "              "
+    "              wifiItem.innerHTML = `"
+    "                <div class=\"wifi-name\">${network.ssid}</div>"
+    "                <div class=\"wifi-info\">"
+    "                  <span class=\"wifi-signal\"><i class=\"fas ${signalIcon}\"></i> ${signalStrength}%</span>"
+    "                  <span class=\"${network.secure ? 'wifi-secure' : 'wifi-open'}\"><i class=\"fas ${network.secure ? 'fa-lock' : 'fa-lock-open'}\"></i></span>"
+    "                </div>"
+    "              `;"
+    "              wifiList.appendChild(wifiItem);"
+    "            });"
+    "          }"
+    "          "
+    "          wifiList.classList.remove('hidden');"
+    "          document.getElementById('scanLoader').classList.add('hidden');"
+    "          document.getElementById('scanBtn').disabled = false;"
+    "        })"
+    "        .catch(error => {"
+    "          console.error('Error scanning WiFi:', error);"
+    "          document.getElementById('wifiList').innerHTML = '<div class=\"wifi-item\">Lỗi khi quét mạng WiFi</div>';"
+    "          document.getElementById('wifiList').classList.remove('hidden');"
+    "          document.getElementById('scanLoader').classList.add('hidden');"
+    "          document.getElementById('scanBtn').disabled = false;"
+    "        });"
+    "    }"
+    "    "
+    "    function selectWiFi(ssid) {"
+    "      document.getElementById('ssid').value = ssid;"
+    "      document.getElementById('password').focus();"
+    "    }"
+    "    "
+    "    function saveWiFi() {"
+    "      const ssid = document.getElementById('ssid').value;"
+    "      const password = document.getElementById('password').value;"
+    "      "
+    "      if(!ssid) {"
+    "        alert('Vui lòng nhập tên mạng WiFi');"
+    "        return;"
+    "      }"
+    "      "
+    "      document.getElementById('saveBtn').disabled = true;"
+    "      document.getElementById('saveBtn').innerHTML = '<div class=\"loader\"></div> Đang lưu...';"
+    "      "
+    "      fetch('/api/save-wifi', {"
+    "        method: 'POST',"
+    "        headers: { 'Content-Type': 'application/json' },"
+    "        body: JSON.stringify({ ssid, password })"
+    "      })"
+    "      .then(response => response.json())"
+    "      .then(data => {"
+    "        if(data.success) {"
+    "          alert('Cấu hình WiFi đã được lưu. Thiết bị sẽ khởi động lại để áp dụng cấu hình mới.');"
+    "          setTimeout(() => { window.location.href = '/'; }, 5000);"
+    "        } else {"
+    "          alert('Lỗi: ' + data.message);"
+    "          document.getElementById('saveBtn').disabled = false;"
+    "          document.getElementById('saveBtn').innerHTML = '<i class=\"fas fa-save\"></i> Lưu & Kết Nối';"
+    "        }"
+    "      })"
+    "      .catch(error => {"
+    "        console.error('Error saving WiFi config:', error);"
+    "        alert('Có lỗi xảy ra khi lưu cấu hình');"
+    "        document.getElementById('saveBtn').disabled = false;"
+    "        document.getElementById('saveBtn').innerHTML = '<i class=\"fas fa-save\"></i> Lưu & Kết Nối';"
+    "      });"
+    "    }"
+    "    "
+    "    function resetWiFi() {"
+    "      if(confirm('Bạn có chắc chắn muốn xóa cấu hình WiFi hiện tại? Thiết bị sẽ chuyển sang chế độ phát WiFi.')) {"
+    "        fetch('/api/reset-wifi', { method: 'POST' })"
+    "          .then(response => response.json())"
+    "          .then(data => {"
+    "            if(data.success) {"
+    "              alert('Đã xóa cấu hình WiFi. Thiết bị sẽ khởi động lại.');"
+    "              setTimeout(() => { window.location.href = '/'; }, 5000);"
+    "            } else {"
+    "              alert('Lỗi: ' + data.message);"
+    "            }"
+    "          })"
+    "          .catch(error => {"
+    "            console.error('Error resetting WiFi config:', error);"
+    "            alert('Có lỗi xảy ra khi xóa cấu hình');"
+    "          });"
+    "      }"
+    "    }"
+    "    "
+    "    // Quét WiFi tự động khi tải trang"
+    "    window.onload = function() {"
+    "      scanWiFi();"
+    "    };"
+    "  </script>"
+    "</body>"
+    "</html>";
+  
+  server.send(200, "text/html", html);
+}
+// Handler for scanning WiFi networks
+void handleWiFiScan() {
+  Serial.println("Scanning WiFi networks...");
+  
+  // Scan for networks
+  int networkCount = WiFi.scanNetworks();
+  Serial.println("Scan completed, found " + String(networkCount) + " networks");
+  
+  // Create JSON response
+  String json = "[";
+  for(int i = 0; i < networkCount; i++) {
+    if(i > 0) json += ",";
+    
+    // Format: { "ssid": "Network name", "rssi": -50, "secure": true }
+    json += "{\"ssid\":\"" + WiFi.SSID(i) + "\",";
+    json += "\"rssi\":" + String(WiFi.RSSI(i)) + ",";
+    json += "\"secure\":" + String(WiFi.encryptionType(i) != WIFI_AUTH_OPEN ? "true" : "false") + "}";
+  }
+  json += "]";
+  
+  server.send(200, "application/json", json);
+  
+  // Clean up scan results
+  WiFi.scanDelete();
+}
+
+// Handler for saving WiFi configuration
+void handleSaveWiFi() {
+  if(server.hasArg("plain")) {
+    DynamicJsonDocument doc(512);
+    DeserializationError error = deserializeJson(doc, server.arg("plain"));
+    
+    if(!error) {
+      String ssid = doc["ssid"];
+      String password = doc["password"];
+      
+      if(ssid.length() == 0) {
+        server.send(200, "application/json", "{\"success\":false,\"message\":\"SSID không được để trống\"}");
+        return;
+      }
+      
+      // Lưu cấu hình WiFi mới
+      saveWiFiConfig(ssid, password);
+      
+      // Gửi phản hồi thành công
+      server.send(200, "application/json", "{\"success\":true,\"message\":\"Cấu hình WiFi đã được lưu. Thiết bị sẽ khởi động lại.\"}");
+      
+      // Lên lịch khởi động lại sau 2 giây để đảm bảo phản hồi HTTP được gửi
+      delay(2000);
+      
+      // Thử kết nối với mạng WiFi mới
+      if (connectToWiFi(ssid, password, 10)) {
+        Serial.println("Kết nối thành công với mạng mới: " + ssid);
+      } else {
+        Serial.println("Không thể kết nối với mạng mới. Chuyển sang chế độ AP.");
+        setupAP(); // Quay lại chế độ AP nếu không thể kết nối
+      }
+      
+      // Khởi động lại ESP32
+      ESP.restart();
+    } else {
+      server.send(400, "application/json", "{\"success\":false,\"message\":\"Dữ liệu JSON không hợp lệ\"}");
+    }
+  } else {
+    server.send(400, "application/json", "{\"success\":false,\"message\":\"Không có dữ liệu\"}");
+  }
+}
+
+// Handler for resetting WiFi configuration
+void handleResetWiFi() {
+  // Xóa cấu hình WiFi
+  clearWiFiConfig();
+  
+  // Gửi phản hồi thành công
+  server.send(200, "application/json", "{\"success\":true,\"message\":\"Đã xóa cấu hình WiFi. Thiết bị sẽ khởi động lại.\"}");
+  
+  // Đợi để đảm bảo phản hồi HTTP được gửi
+  delay(1000);
+  
+  // Chuyển sang chế độ AP
+  setupAP();
+  
+  // Khởi động lại ESP32
+  ESP.restart();
+}
