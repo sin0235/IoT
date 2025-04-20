@@ -31,6 +31,101 @@ const char* AP_PASSWORD = "12345678";
 #define ARDUINO_BAUD_RATE 9600
 #define COMMAND_TIMEOUT 3000  // 3 giay timeout cho lenh Arduino
 
+// Authentication variables
+#define SESSION_TIMEOUT 1800000  // 30 minutes in milliseconds
+struct Session {
+  String username;
+  String token;
+  unsigned long lastActivity;
+  bool isAdmin;
+};
+
+Session activeSessions[10];  // Up to 10 concurrent sessions
+int sessionCount = 0;
+// Generate a random session token
+String generateSessionToken() {
+  String token = "";
+  for (int i = 0; i < 16; i++) {
+    token += char(random(65, 90));  // A-Z
+  }
+  return token;
+}
+
+// Add a new session or update existing one
+String createSession(String username, bool isAdmin) {
+  // Check if user already has a session
+  for (int i = 0; i < sessionCount; i++) {
+    if (activeSessions[i].username == username) {
+      // Update existing session
+      activeSessions[i].lastActivity = millis();
+      return activeSessions[i].token;
+    }
+  }
+  
+  // Create new session if space available
+  if (sessionCount < 10) {
+    String token = generateSessionToken();
+    activeSessions[sessionCount].username = username;
+    activeSessions[sessionCount].token = token;
+    activeSessions[sessionCount].lastActivity = millis();
+    activeSessions[sessionCount].isAdmin = isAdmin;
+    sessionCount++;
+    return token;
+  }
+  
+  // No space available, find oldest session and replace it
+  int oldestSession = 0;
+  for (int i = 1; i < sessionCount; i++) {
+    if (activeSessions[i].lastActivity < activeSessions[oldestSession].lastActivity) {
+      oldestSession = i;
+    }
+  }
+  
+  String token = generateSessionToken();
+  activeSessions[oldestSession].username = username;
+  activeSessions[oldestSession].token = token;
+  activeSessions[oldestSession].lastActivity = millis();
+  activeSessions[oldestSession].isAdmin = isAdmin;
+  return token;
+}
+
+// Validate a session token
+bool validateSession(String token, bool requireAdmin = false) {
+  if (token.length() == 0) return false;
+  
+  unsigned long currentTime = millis();
+  for (int i = 0; i < sessionCount; i++) {
+    if (activeSessions[i].token == token) {
+      // Check if session has expired
+      if (currentTime - activeSessions[i].lastActivity > SESSION_TIMEOUT) {
+        return false;
+      }
+      
+      // Update last activity time
+      activeSessions[i].lastActivity = currentTime;
+      
+      // Check admin requirement
+      if (requireAdmin && !activeSessions[i].isAdmin) {
+        return false;
+      }
+      
+      return true;
+    }
+  }
+  return false;
+}
+
+// Get username from token
+String getUsernameFromToken(String token) {
+  for (int i = 0; i < sessionCount; i++) {
+    if (activeSessions[i].token == token) {
+      return activeSessions[i].username;
+    }
+  }
+  return "";
+}
+
+
 // ===== BIEN TOAN CUC =====
 WebServer server(80);
 Preferences preferences;
@@ -1141,17 +1236,22 @@ void handleRoot() {
   server.send(200, "text/html", html);
 }
 
-
 void handleLogin() {
   String username = server.arg("username");
   String password = server.arg("password");
   
   if(authenticateUser(username, password)) {
-    if(isAdmin(username)) {
+    // Create session and get token
+    bool userIsAdmin = isAdmin(username);
+    String token = createSession(username, userIsAdmin);
+    
+    if(userIsAdmin) {
+      server.sendHeader("Set-Cookie", "session=" + token + "; Path=/; SameSite=Strict; Max-Age=1800");
       server.sendHeader("Location", "/admin");
       server.send(302);
     } else {
-      server.sendHeader("Location", "/dashboard?user=" + username);
+      server.sendHeader("Set-Cookie", "session=" + token + "; Path=/; SameSite=Strict; Max-Age=1800");
+      server.sendHeader("Location", "/dashboard");
       server.send(302);
     }
   } else {
@@ -1323,6 +1423,24 @@ void handleLogin() {
 }
 
 void handleAdminPanel() {
+   String token = "";
+  if (server.hasHeader("Cookie")) {
+    String cookie = server.header("Cookie");
+    int start = cookie.indexOf("session=");
+    if (start != -1) {
+      start += 8; // Length of "session="
+      int end = cookie.indexOf(";", start);
+      if (end == -1) end = cookie.length();
+      token = cookie.substring(start, end);
+    }
+  }
+  
+  // Validate session with admin requirement
+  if (!validateSession(token, true)) {
+    server.sendHeader("Location", "/");
+    server.send(302);
+    return;
+  }
   String html = "<!DOCTYPE html>"
     "<html lang=\"vi\">"
     "<head>"
@@ -1935,9 +2053,30 @@ void handleAdminPanel() {
 }
 
 void handleUserDashboard() {
-  String username = server.arg("user");
+    // Get session token from cookie
+  String token = "";
+  if (server.hasHeader("Cookie")) {
+    String cookie = server.header("Cookie");
+    int start = cookie.indexOf("session=");
+    if (start != -1) {
+      start += 8; // Length of "session="
+      int end = cookie.indexOf(";", start);
+      if (end == -1) end = cookie.length();
+      token = cookie.substring(start, end);
+    }
+  }
   
-  // Kiểm tra người dùng hợp lệ
+  // Validate session
+  if (!validateSession(token)) {
+    server.sendHeader("Location", "/");
+    server.send(302);
+    return;
+  }
+  
+  // Get username from token
+  String username = getUsernameFromToken(token);
+  
+  // Make sure the user exists and is active
   bool validUser = false;
   for(int i = 0; i < userCount; i++) {
     if(users[i].username == username && users[i].active) {
