@@ -1,3 +1,4 @@
+
 /**
  * He Thong Quan Ly Cua Thong Minh - ESP32S
  * Ket noi voi Arduino Uno qua giao tiep UART va module chuyen doi muc logic
@@ -25,114 +26,6 @@ const char* Password = "25032005";
 bool APMode = false;
 const char* AP_SSID = "SmartDoor";
 const char* AP_PASSWORD = "12345678";
-
-
-// ===== CAU HINH UART =====
-#define ARDUINO_BAUD_RATE 9600
-#define COMMAND_TIMEOUT 3000  // 3 giay timeout cho lenh Arduino
-
-// Authentication variables
-#define SESSION_TIMEOUT 1800000  // 30 minutes in milliseconds
-struct Session {
-  String username;
-  String token;
-  unsigned long lastActivity;
-  bool isAdmin;
-};
-
-Session activeSessions[10];  // Up to 10 concurrent sessions
-int sessionCount = 0;
-// Generate a random session token
-String generateSessionToken() {
-  String token = "";
-  for (int i = 0; i < 16; i++) {
-    token += char(random(65, 90));  // A-Z
-  }
-  return token;
-}
-
-// Add a new session or update existing one
-String createSession(String username, bool isAdmin) {
-  // Check if user already has a session
-  for (int i = 0; i < sessionCount; i++) {
-    if (activeSessions[i].username == username) {
-      // Update existing session
-      activeSessions[i].lastActivity = millis();
-      return activeSessions[i].token;
-    }
-  }
-  
-  // Create new session if space available
-  if (sessionCount < 10) {
-    String token = generateSessionToken();
-    activeSessions[sessionCount].username = username;
-    activeSessions[sessionCount].token = token;
-    activeSessions[sessionCount].lastActivity = millis();
-    activeSessions[sessionCount].isAdmin = isAdmin;
-    sessionCount++;
-    return token;
-  }
-  
-  // No space available, find oldest session and replace it
-  int oldestSession = 0;
-  for (int i = 1; i < sessionCount; i++) {
-    if (activeSessions[i].lastActivity < activeSessions[oldestSession].lastActivity) {
-      oldestSession = i;
-    }
-  }
-  
-  String token = generateSessionToken();
-  activeSessions[oldestSession].username = username;
-  activeSessions[oldestSession].token = token;
-  activeSessions[oldestSession].lastActivity = millis();
-  activeSessions[oldestSession].isAdmin = isAdmin;
-  return token;
-}
-
-// Validate a session token
-bool validateSession(String token, bool requireAdmin = false) {
-  if (token.length() == 0) return false;
-  
-  unsigned long currentTime = millis();
-  for (int i = 0; i < sessionCount; i++) {
-    if (activeSessions[i].token == token) {
-      // Check if session has expired
-      if (currentTime - activeSessions[i].lastActivity > SESSION_TIMEOUT) {
-        return false;
-      }
-      
-      // Update last activity time
-      activeSessions[i].lastActivity = currentTime;
-      
-      // Check admin requirement
-      if (requireAdmin && !activeSessions[i].isAdmin) {
-        return false;
-      }
-      
-      return true;
-    }
-  }
-  return false;
-}
-
-// Get username from token
-String getUsernameFromToken(String token) {
-  for (int i = 0; i < sessionCount; i++) {
-    if (activeSessions[i].token == token) {
-      return activeSessions[i].username;
-    }
-  }
-  return "";
-}
-
-
-// ===== BIEN TOAN CUC =====
-WebServer server(80);
-Preferences preferences;
-bool doorIsOpen = false;
-String lastAccessUser = "";
-unsigned long lastAccessTime = 0;
-
 // Cau truc du lieu nguoi dung
 struct User {
   String username;
@@ -145,10 +38,26 @@ struct User {
 User users[20];
 int userCount = 0;
 
+
+// ===== CAU HINH UART =====
+#define ARDUINO_BAUD_RATE 9600
+#define COMMAND_TIMEOUT 3000  // 3 giay timeout cho lenh Arduino
+
+// ===== BIEN TOAN CUC =====
+WebServer server(8888);
+Preferences preferences;
+bool doorIsOpen = false;
+String lastAccessUser = "";
+unsigned long lastAccessTime = 0;
+
+
 // Buffer giao tiep Serial
 String serialBuffer = "";
 bool responseReceived = false;
 String lastResponse = "";
+
+
+bool isAuthenticated = false;  // Kiểm soát trạng thái đăng nhập
 
 // Function declarations
 String sendCommandToArduino(String command, long unsigned int timeout = COMMAND_TIMEOUT);
@@ -182,7 +91,7 @@ void handleWiFiScan();
 void handleSaveWiFi();
 void handleResetWiFi();
 void restart();
-
+void handleLogout();
 // ===== KHOI TAO HE THONG =====
 void setup() {
   // Khởi tạo cổng Serial để debug
@@ -215,13 +124,15 @@ void setup() {
   // Tải danh sách người dùng
   loadUsers();
   Serial.println("Đã tải danh sách người dùng");
-  
+  WiFi.mode(WIFI_AP_STA); 
+  setupAP();
   // Thử kết nối WiFi từ cấu hình đã lưu
   if (!loadWiFiConfig()) {
     Serial.println("Không có cấu hình WiFi hoặc không thể kết nối, chuyển sang chế độ AP");
     setupAP();
   }
   
+
   // Thiết lập các routes cho web server
   setupServerRoutes();
   setupWiFiConfigRoutes(); // Thêm routes cho cấu hình WiFi
@@ -481,13 +392,13 @@ void saveAccessLog(String method) {
 // ===== KET NOI WIFI =====
 bool connectToWiFi(String ssid, String password, int timeout) {
   // Thoát khỏi chế độ AP nếu đang bật
-  if(APMode) {
-    WiFi.softAPdisconnect(true);
-    delay(500);
-  }
+  // if(APMode) {
+  //   WiFi.softAPdisconnect(true);
+  //   delay(500);
+  // }
   
   // Thiết lập chế độ Station
-  WiFi.mode(WIFI_STA);
+  // WiFi.mode(WIFI_STA);
   APMode = false;
   
   Serial.print("Đang kết nối WiFi với SSID: ");
@@ -745,8 +656,6 @@ void setupServerRoutes() {
   // Trang chu va dang nhap
   server.on("/", HTTP_GET, handleRoot);
   server.on("/login", HTTP_POST, handleLogin);
-  server.on("/api/arduino-status", HTTP_GET, handleArduinoStatus);
-
   // Trang dieu khien
   server.on("/admin", HTTP_GET, handleAdminPanel);
   server.on("/dashboard", HTTP_GET, handleUserDashboard);
@@ -785,14 +694,14 @@ void setupAP() {
   APMode = true;
   
   // Ngắt kết nối WiFi hiện tại một cách triệt để
-  WiFi.disconnect(true);
-  delay(100);
+  // WiFi.disconnect(true);
+  // delay(100);
   
   // Thiết lập chế độ AP với reset hoàn toàn
-  WiFi.mode(WIFI_OFF);
-  delay(100);
-  WiFi.mode(WIFI_AP);
-  delay(100);
+  // WiFi.mode(WIFI_OFF);
+  // delay(100);
+  // WiFi.mode(WIFI_AP);
+  // delay(100);
   
   // Cấu hình IP tĩnh cho AP để tránh xung đột
   IPAddress local_IP(192,168,4,1);
@@ -865,9 +774,9 @@ void clearWiFiConfig() {
   Serial.println("Đã xóa cấu hình WiFi");
 }
 
-// Giữ nguyên tất cả các handler hiện có
 void handleRoot() {
-  String html = "<!DOCTYPE html>"
+  isAuthenticated = false;
+  String html = "<!DOCPE html>"
     "<html lang=\"vi\">"
     "<head>"
     "  <meta charset=\"UTF-8\">"
@@ -1236,22 +1145,18 @@ void handleRoot() {
   server.send(200, "text/html", html);
 }
 
+
 void handleLogin() {
   String username = server.arg("username");
   String password = server.arg("password");
   
   if(authenticateUser(username, password)) {
-    // Create session and get token
-    bool userIsAdmin = isAdmin(username);
-    String token = createSession(username, userIsAdmin);
-    
-    if(userIsAdmin) {
-      server.sendHeader("Set-Cookie", "session=" + token + "; Path=/; SameSite=Strict; Max-Age=1800");
+    isAuthenticated = true;
+    if(isAdmin(username)) {
       server.sendHeader("Location", "/admin");
       server.send(302);
     } else {
-      server.sendHeader("Set-Cookie", "session=" + token + "; Path=/; SameSite=Strict; Max-Age=1800");
-      server.sendHeader("Location", "/dashboard");
+      server.sendHeader("Location", "/dashboard?user=" + username);
       server.send(302);
     }
   } else {
@@ -1423,24 +1328,8 @@ void handleLogin() {
 }
 
 void handleAdminPanel() {
-   String token = "";
-  if (server.hasHeader("Cookie")) {
-    String cookie = server.header("Cookie");
-    int start = cookie.indexOf("session=");
-    if (start != -1) {
-      start += 8; // Length of "session="
-      int end = cookie.indexOf(";", start);
-      if (end == -1) end = cookie.length();
-      token = cookie.substring(start, end);
-    }
-  }
-  
-  // Validate session with admin requirement
-  if (!validateSession(token, true)) {
-    server.sendHeader("Location", "/");
-    server.send(302);
-    return;
-  }
+  if( !isAuthenticated) return;
+  isAuthenticated = false;
   String html = "<!DOCTYPE html>"
     "<html lang=\"vi\">"
     "<head>"
@@ -2053,30 +1942,11 @@ void handleAdminPanel() {
 }
 
 void handleUserDashboard() {
-    // Get session token from cookie
-  String token = "";
-  if (server.hasHeader("Cookie")) {
-    String cookie = server.header("Cookie");
-    int start = cookie.indexOf("session=");
-    if (start != -1) {
-      start += 8; // Length of "session="
-      int end = cookie.indexOf(";", start);
-      if (end == -1) end = cookie.length();
-      token = cookie.substring(start, end);
-    }
-  }
+  if(!isAuthenticated) return;
+  isAuthenticated = false;
+  String username = server.arg("user");
   
-  // Validate session
-  if (!validateSession(token)) {
-    server.sendHeader("Location", "/");
-    server.send(302);
-    return;
-  }
-  
-  // Get username from token
-  String username = getUsernameFromToken(token);
-  
-  // Make sure the user exists and is active
+  // Kiểm tra người dùng hợp lệ
   bool validUser = false;
   for(int i = 0; i < userCount; i++) {
     if(users[i].username == username && users[i].active) {
