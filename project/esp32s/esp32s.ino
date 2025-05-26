@@ -392,10 +392,10 @@ void saveAccessLog(String method) {
 // ===== KET NOI WIFI =====
 bool connectToWiFi(String ssid, String password, int timeout) {
   // Thoát khỏi chế độ AP nếu đang bật
-  // if(APMode) {
-  //   WiFi.softAPdisconnect(true);
-  //   delay(500);
-  // }
+  if(APMode) {
+    WiFi.softAPdisconnect(true);
+    delay(500);
+  }
   
   // Thiết lập chế độ Station
   // WiFi.mode(WIFI_STA);
@@ -693,15 +693,13 @@ void setupWiFiConfigRoutes() {
 void setupAP() {
   APMode = true;
   
-  // Ngắt kết nối WiFi hiện tại một cách triệt để
-  // WiFi.disconnect(true);
-  // delay(100);
+  WiFi.disconnect(true);
+  delay(100);
   
-  // Thiết lập chế độ AP với reset hoàn toàn
-  // WiFi.mode(WIFI_OFF);
-  // delay(100);
-  // WiFi.mode(WIFI_AP);
-  // delay(100);
+  WiFi.mode(WIFI_OFF);
+  delay(100);
+  WiFi.mode(WIFI_AP);
+  delay(100);
   
   // Cấu hình IP tĩnh cho AP để tránh xung đột
   IPAddress local_IP(192,168,4,1);
