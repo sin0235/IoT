@@ -57,7 +57,57 @@ bool responseReceived = false;
 String lastResponse = "";
 
 
-bool isAuthenticated = false;  // Kiểm soát trạng thái đăng nhập
+// ===== SESSION MANAGEMENT SYSTEM =====
+struct Session {
+  String token;
+  String username;
+  bool isAdmin;
+  unsigned long loginTime;
+  unsigned long lastActivity;
+  unsigned long expiresAt;
+  bool rememberMe;
+  bool active;
+};
+
+// Session configuration
+const int MAX_SESSIONS = 5;
+const unsigned long SESSION_TIMEOUT = 30 * 60 * 1000; // 30 minutes in milliseconds
+const unsigned long REMEMBER_ME_TIMEOUT = 7 * 24 * 60 * 60 * 1000UL; // 7 days in milliseconds
+const unsigned long ACTIVITY_CHECK_INTERVAL = 60 * 1000; // 1 minute
+const int MAX_LOGIN_ATTEMPTS = 5;
+const unsigned long LOGIN_LOCKOUT_TIME = 5 * 60 * 1000; // 5 minutes
+
+// Session storage
+Session sessions[MAX_SESSIONS];
+int sessionCount = 0;
+
+// Rate limiting storage
+struct LoginAttempt {
+  String clientIP;
+  int attempts;
+  unsigned long lastAttempt;
+  bool isLocked;
+};
+
+LoginAttempt loginAttempts[10]; // Track up to 10 IPs
+int loginAttemptCount = 0;
+
+// Session management functions
+String generateSessionToken();
+int createSession(String username, bool isAdmin, bool rememberMe = false);
+bool validateSession(String token);
+Session* getSession(String token);
+void extendSession(String token);
+void destroySession(String token);
+void cleanupExpiredSessions();
+void saveSessionToPreferences(int index);
+void loadSessionsFromPreferences();
+bool isRateLimited(String clientIP);
+void recordLoginAttempt(String clientIP, bool success);
+
+// Authentication middleware
+bool requireAuthentication(String token);
+bool requireAdminAuthentication(String token);
 
 // Function declarations
 String sendCommandToArduino(String command, long unsigned int timeout = COMMAND_TIMEOUT);
@@ -86,12 +136,364 @@ void handleGetUsers();
 void handleAddUser();
 void handleDeleteUser();
 void handleGetLogs();
+void handleSessionInfo();
 void handleWiFiSetup();
 void handleWiFiScan();
 void handleSaveWiFi();
 void handleResetWiFi();
 void restart();
 void handleLogout();
+// ===== SESSION MANAGEMENT IMPLEMENTATION =====
+
+// Generate a random session token
+String generateSessionToken() {
+  String token = "";
+  String chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+  
+  // Use millis() and random values for better entropy
+  randomSeed(millis() + ESP.getCycleCount());
+  
+  for(int i = 0; i < 32; i++) {
+    token += chars[random(chars.length())];
+  }
+  
+  return token;
+}
+
+// Create a new session
+int createSession(String username, bool isAdmin, bool rememberMe) {
+  cleanupExpiredSessions(); // Clean up before creating new session
+  
+  // Find available session slot
+  int sessionIndex = -1;
+  for(int i = 0; i < MAX_SESSIONS; i++) {
+    if(!sessions[i].active) {
+      sessionIndex = i;
+      break;
+    }
+  }
+  
+  // If no slot available, remove oldest session
+  if(sessionIndex == -1) {
+    unsigned long oldestTime = sessions[0].loginTime;
+    sessionIndex = 0;
+    
+    for(int i = 1; i < MAX_SESSIONS; i++) {
+      if(sessions[i].loginTime < oldestTime) {
+        oldestTime = sessions[i].loginTime;
+        sessionIndex = i;
+      }
+    }
+  }
+  
+  // Create new session
+  Session* session = &sessions[sessionIndex];
+  session->token = generateSessionToken();
+  session->username = username;
+  session->isAdmin = isAdmin;
+  session->loginTime = millis();
+  session->lastActivity = millis();
+  session->rememberMe = rememberMe;
+  session->expiresAt = millis() + (rememberMe ? REMEMBER_ME_TIMEOUT : SESSION_TIMEOUT);
+  session->active = true;
+  
+  // Save to preferences
+  saveSessionToPreferences(sessionIndex);
+  
+  Serial.println("Session created for user: " + username + ", Token: " + session->token.substring(0, 8) + "...");
+  return sessionIndex;
+}
+
+// Validate session token
+bool validateSession(String token) {
+  if(token.length() == 0) return false;
+  
+  cleanupExpiredSessions();
+  
+  for(int i = 0; i < MAX_SESSIONS; i++) {
+    if(sessions[i].active && sessions[i].token == token) {
+      // Check if session has expired
+      if(millis() > sessions[i].expiresAt) {
+        destroySession(token);
+        return false;
+      }
+      
+      // Update last activity
+      sessions[i].lastActivity = millis();
+      return true;
+    }
+  }
+  
+  return false;
+}
+
+// Get session by token
+Session* getSession(String token) {
+  if(!validateSession(token)) return nullptr;
+  
+  for(int i = 0; i < MAX_SESSIONS; i++) {
+    if(sessions[i].active && sessions[i].token == token) {
+      return &sessions[i];
+    }
+  }
+  
+  return nullptr;
+}
+
+// Extend session duration
+void extendSession(String token) {
+  Session* session = getSession(token);
+  if(session) {
+    unsigned long extension = session->rememberMe ? REMEMBER_ME_TIMEOUT : SESSION_TIMEOUT;
+    session->expiresAt = millis() + extension;
+    session->lastActivity = millis();
+    
+    // Save updated session
+    for(int i = 0; i < MAX_SESSIONS; i++) {
+      if(sessions[i].token == token) {
+        saveSessionToPreferences(i);
+        break;
+      }
+    }
+  }
+}
+
+// Destroy a session
+void destroySession(String token) {
+  for(int i = 0; i < MAX_SESSIONS; i++) {
+    if(sessions[i].active && sessions[i].token == token) {
+      Serial.println("Destroying session for user: " + sessions[i].username);
+      
+      // Clear session data
+      sessions[i].token = "";
+      sessions[i].username = "";
+      sessions[i].isAdmin = false;
+      sessions[i].loginTime = 0;
+      sessions[i].lastActivity = 0;
+      sessions[i].expiresAt = 0;
+      sessions[i].rememberMe = false;
+      sessions[i].active = false;
+      
+      // Remove from preferences
+      preferences.begin("sessions", false);
+      String key = "session" + String(i);
+      preferences.remove(key.c_str());
+      preferences.end();
+      
+      break;
+    }
+  }
+}
+
+// Clean up expired sessions
+void cleanupExpiredSessions() {
+  unsigned long currentTime = millis();
+  
+  for(int i = 0; i < MAX_SESSIONS; i++) {
+    if(sessions[i].active) {
+      // Check for expiration
+      if(currentTime > sessions[i].expiresAt) {
+        Serial.println("Session expired for user: " + sessions[i].username);
+        destroySession(sessions[i].token);
+      }
+      // Check for inactivity (auto-logout after long inactivity)
+      else if((currentTime - sessions[i].lastActivity) > SESSION_TIMEOUT) {
+        Serial.println("Session timeout due to inactivity for user: " + sessions[i].username);
+        destroySession(sessions[i].token);
+      }
+    }
+  }
+}
+
+// Save session to preferences
+void saveSessionToPreferences(int index) {
+  if(index < 0 || index >= MAX_SESSIONS) return;
+  
+  Session* session = &sessions[index];
+  preferences.begin("sessions", false);
+  
+  String key = "session" + String(index);
+  String value = session->token + "|" + 
+                 session->username + "|" +
+                 (session->isAdmin ? "1" : "0") + "|" +
+                 String(session->loginTime) + "|" +
+                 String(session->lastActivity) + "|" +
+                 String(session->expiresAt) + "|" +
+                 (session->rememberMe ? "1" : "0") + "|" +
+                 (session->active ? "1" : "0");
+  
+  preferences.putString(key.c_str(), value.c_str());
+  preferences.end();
+}
+
+// Load sessions from preferences
+void loadSessionsFromPreferences() {
+  preferences.begin("sessions", true);
+  
+  // Initialize all sessions as inactive
+  for(int i = 0; i < MAX_SESSIONS; i++) {
+    sessions[i].active = false;
+  }
+  
+  for(int i = 0; i < MAX_SESSIONS; i++) {
+    String key = "session" + String(i);
+    String value = preferences.getString(key.c_str(), "");
+    
+    if(value.length() > 0) {
+      // Parse session data: token|username|isAdmin|loginTime|lastActivity|expiresAt|rememberMe|active
+      int pos = 0;
+      String parts[8];
+      int partIndex = 0;
+      
+      for(int j = 0; j < value.length() && partIndex < 8; j++) {
+        if(value.charAt(j) == '|') {
+          parts[partIndex] = value.substring(pos, j);
+          partIndex++;
+          pos = j + 1;
+        }
+      }
+      if(partIndex < 8) parts[partIndex] = value.substring(pos);
+      
+      if(partIndex >= 7) {
+        sessions[i].token = parts[0];
+        sessions[i].username = parts[1];
+        sessions[i].isAdmin = (parts[2] == "1");
+        sessions[i].loginTime = parts[3].toInt();
+        sessions[i].lastActivity = parts[4].toInt();
+        sessions[i].expiresAt = parts[5].toInt();
+        sessions[i].rememberMe = (parts[6] == "1");
+        sessions[i].active = (parts[7] == "1");
+        
+        Serial.println("Loaded session for user: " + sessions[i].username);
+      }
+    }
+  }
+  
+  preferences.end();
+  
+  // Clean up expired sessions after loading
+  cleanupExpiredSessions();
+}
+
+// Rate limiting functions
+bool isRateLimited(String clientIP) {
+  unsigned long currentTime = millis();
+  
+  for(int i = 0; i < loginAttemptCount; i++) {
+    if(loginAttempts[i].clientIP == clientIP) {
+      // Check if lockout period has expired
+      if(loginAttempts[i].isLocked && 
+         (currentTime - loginAttempts[i].lastAttempt) > LOGIN_LOCKOUT_TIME) {
+        loginAttempts[i].isLocked = false;
+        loginAttempts[i].attempts = 0;
+        return false;
+      }
+      
+      return loginAttempts[i].isLocked;
+    }
+  }
+  
+  return false; // IP not found, not rate limited
+}
+
+void recordLoginAttempt(String clientIP, bool success) {
+  unsigned long currentTime = millis();
+  
+  // Find existing record or create new one
+  int recordIndex = -1;
+  for(int i = 0; i < loginAttemptCount; i++) {
+    if(loginAttempts[i].clientIP == clientIP) {
+      recordIndex = i;
+      break;
+    }
+  }
+  
+  // Create new record if not found
+  if(recordIndex == -1 && loginAttemptCount < 10) {
+    recordIndex = loginAttemptCount++;
+    loginAttempts[recordIndex].clientIP = clientIP;
+    loginAttempts[recordIndex].attempts = 0;
+    loginAttempts[recordIndex].isLocked = false;
+  }
+  
+  if(recordIndex != -1) {
+    loginAttempts[recordIndex].lastAttempt = currentTime;
+    
+    if(success) {
+      // Reset attempts on successful login
+      loginAttempts[recordIndex].attempts = 0;
+      loginAttempts[recordIndex].isLocked = false;
+    } else {
+      // Increment failed attempts
+      loginAttempts[recordIndex].attempts++;
+      
+      // Lock if too many attempts
+      if(loginAttempts[recordIndex].attempts >= MAX_LOGIN_ATTEMPTS) {
+        loginAttempts[recordIndex].isLocked = true;
+        Serial.println("IP " + clientIP + " locked due to too many failed login attempts");
+      }
+    }
+  }
+}
+
+// Authentication middleware functions
+bool requireAuthentication(String token) {
+  return validateSession(token);
+}
+
+bool requireAdminAuthentication(String token) {
+  Session* session = getSession(token);
+  return (session != nullptr && session->isAdmin);
+}
+
+// Additional session management helper functions
+void clearAllSessions() {
+  for(int i = 0; i < MAX_SESSIONS; i++) {
+    if(sessions[i].active) {
+      destroySession(sessions[i].token);
+    }
+  }
+  Serial.println("All sessions cleared");
+}
+
+int getActiveSessionCount() {
+  int count = 0;
+  cleanupExpiredSessions(); // Clean up first
+  for(int i = 0; i < MAX_SESSIONS; i++) {
+    if(sessions[i].active) {
+      count++;
+    }
+  }
+  return count;
+}
+
+String getSessionInfo(String token) {
+  Session* session = getSession(token);
+  if(session) {
+    return "User: " + session->username + 
+           ", Admin: " + (session->isAdmin ? "Yes" : "No") +
+           ", Remember: " + (session->rememberMe ? "Yes" : "No") +
+           ", Expires: " + String(session->expiresAt);
+  }
+  return "Session not found";
+}
+
+// Helper function to extract session token from cookies
+String getSessionTokenFromCookie() {
+  String sessionToken = "";
+  if(server.hasHeader("Cookie")) {
+    String cookies = server.header("Cookie");
+    int tokenStart = cookies.indexOf("session_token=");
+    if(tokenStart != -1) {
+      tokenStart += 14;
+      int tokenEnd = cookies.indexOf(";", tokenStart);
+      if(tokenEnd == -1) tokenEnd = cookies.length();
+      sessionToken = cookies.substring(tokenStart, tokenEnd);
+    }
+  }
+  return sessionToken;
+}
+
 // ===== KHOI TAO HE THONG =====
 void setup() {
   // Khởi tạo cổng Serial để debug
@@ -124,6 +526,10 @@ void setup() {
   // Tải danh sách người dùng
   loadUsers();
   Serial.println("Đã tải danh sách người dùng");
+  
+  // Load existing sessions from preferences
+  loadSessionsFromPreferences();
+  Serial.println("Đã tải các phiên đăng nhập");
   WiFi.mode(WIFI_AP_STA); 
   setupAP();
   // Thử kết nối WiFi từ cấu hình đã lưu
@@ -313,6 +719,13 @@ void loop() {
       WiFi.reconnect();
     }
     lastWiFiCheckTime = millis();
+  }
+  
+  // Periodic session cleanup
+  static unsigned long lastSessionCleanup = 0;
+  if (millis() - lastSessionCleanup > ACTIVITY_CHECK_INTERVAL) {
+    cleanupExpiredSessions();
+    lastSessionCleanup = millis();
   }
   static unsigned long resetButtonPressTime = 0;
   if (digitalRead(0) == LOW) {
@@ -656,6 +1069,7 @@ void setupServerRoutes() {
   // Trang chu va dang nhap
   server.on("/", HTTP_GET, handleRoot);
   server.on("/login", HTTP_POST, handleLogin);
+  server.on("/logout", HTTP_GET, handleLogout);
   // Trang dieu khien
   server.on("/admin", HTTP_GET, handleAdminPanel);
   server.on("/dashboard", HTTP_GET, handleUserDashboard);
@@ -667,6 +1081,7 @@ void setupServerRoutes() {
   server.on("/api/add-user", HTTP_POST, handleAddUser);
   server.on("/api/delete-user", HTTP_POST, handleDeleteUser);
   server.on("/api/logs", HTTP_GET, handleGetLogs);
+  server.on("/api/session-info", HTTP_GET, handleSessionInfo);
   
   // 404 Not Found
   server.onNotFound([]() {
@@ -773,7 +1188,35 @@ void clearWiFiConfig() {
 }
 
 void handleRoot() {
-  isAuthenticated = false;
+  // Check if user already has a valid session
+  String sessionToken = "";
+  if(server.hasHeader("Cookie")) {
+    String cookies = server.header("Cookie");
+    int tokenStart = cookies.indexOf("session_token=");
+    if(tokenStart != -1) {
+      tokenStart += 14; // Length of "session_token="
+      int tokenEnd = cookies.indexOf(";", tokenStart);
+      if(tokenEnd == -1) tokenEnd = cookies.length();
+      sessionToken = cookies.substring(tokenStart, tokenEnd);
+    }
+  }
+  
+  // If valid session exists, redirect to appropriate dashboard
+  if(sessionToken.length() > 0 && validateSession(sessionToken)) {
+    Session* session = getSession(sessionToken);
+    if(session) {
+      extendSession(sessionToken); // Extend session on activity
+      if(session->isAdmin) {
+        server.sendHeader("Location", "/admin");
+        server.send(302);
+        return;
+      } else {
+        server.sendHeader("Location", "/dashboard?user=" + session->username);
+        server.send(302);
+        return;
+      }
+    }
+  }
   String html = "<!DOCPE html>"
     "<html lang=\"vi\">"
     "<head>"
@@ -1147,17 +1590,152 @@ void handleRoot() {
 void handleLogin() {
   String username = server.arg("username");
   String password = server.arg("password");
+  String rememberMe = server.arg("remember");
+  String clientIP = server.client().remoteIP().toString();
+  
+  // Check rate limiting
+  if(isRateLimited(clientIP)) {
+    String html = "<!DOCTYPE html>"
+      "<html lang=\"vi\">"
+      "<head>"
+      "  <meta charset=\"UTF-8\">"
+      "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">"
+      "  <title>Tạm khóa do nhiều lần đăng nhập sai</title>"
+      "  <link rel=\"stylesheet\" href=\"https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css\">"
+      "  <style>"
+      "    :root {"
+      "      --primary-color: #3498db;"
+      "      --error-color: #e74c3c;"
+      "      --button-color: #2ecc71;"
+      "      --hover-color: #27ae60;"
+      "      --text-color: #333333;"
+      "      --light-bg: #f5f7fa;"
+      "      --shadow: 0 4px 12px rgba(0,0,0,0.1);"
+      "      --border-radius: 8px;"
+      "    }"
+      "    * { margin: 0; padding: 0; box-sizing: border-box; }"
+      "    body {"
+      "      font-family: 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;"
+      "      background-color: var(--light-bg);"
+      "      color: var(--text-color);"
+      "      line-height: 1.6;"
+      "      height: 100vh;"
+      "      display: flex;"
+      "      justify-content: center;"
+      "      align-items: center;"
+      "    }"
+      "    .container {"
+      "      width: 90%;"
+      "      max-width: 400px;"
+      "      background-color: white;"
+      "      border-radius: var(--border-radius);"
+      "      box-shadow: var(--shadow);"
+      "      padding: 30px;"
+      "      text-align: center;"
+      "    }"
+      "    .icon-container {"
+      "      width: 80px;"
+      "      height: 80px;"
+      "      background-color: rgba(231, 76, 60, 0.1);"
+      "      border-radius: 50%;"
+      "      display: flex;"
+      "      align-items: center;"
+      "      justify-content: center;"
+      "      margin: 0 auto 20px;"
+      "    }"
+      "    .icon {"
+      "      font-size: 40px;"
+      "      color: var(--error-color);"
+      "    }"
+      "    h1 {"
+      "      font-size: 24px;"
+      "      font-weight: 600;"
+      "      margin-bottom: 10px;"
+      "      color: var(--text-color);"
+      "    }"
+      "    .error-message {"
+      "      background-color: rgba(231, 76, 60, 0.1);"
+      "      border-left: 4px solid var(--error-color);"
+      "      padding: 15px;"
+      "      border-radius: 4px;"
+      "      margin: 20px 0;"
+      "      text-align: left;"
+      "    }"
+      "    .help-text {"
+      "      font-size: 14px;"
+      "      color: #7f8c8d;"
+      "      margin-bottom: 20px;"
+      "    }"
+      "    .btn {"
+      "      background-color: var(--button-color);"
+      "      color: white;"
+      "      padding: 12px 20px;"
+      "      border: none;"
+      "      border-radius: var(--border-radius);"
+      "      cursor: pointer;"
+      "      font-size: 16px;"
+      "      text-decoration: none;"
+      "      display: inline-block;"
+      "    }"
+      "  </style>"
+      "</head>"
+      "<body>"
+      "  <div class=\"container\">"
+      "    <div class=\"icon-container\">"
+      "      <i class=\"fas fa-ban icon\"></i>"
+      "    </div>"
+      "    <h1>Tạm khóa truy cập</h1>"
+      "    <div class=\"error-message\">"
+      "      <i class=\"fas fa-shield-alt\"></i> Tài khoản đã bị khóa tạm thời do quá nhiều lần đăng nhập sai."
+      "    </div>"
+      "    <p class=\"help-text\">Vui lòng đợi 5 phút trước khi thử lại hoặc liên hệ quản trị viên.</p>"
+      "    <a href=\"/\" class=\"btn\">Quay lại trang đăng nhập</a>"
+      "  </div>"
+      "  <script>"
+      "    setTimeout(function() {"
+      "      window.location.href = '/';"
+      "    }, 300000);" // 5 minutes
+      "  </script>"
+      "</body>"
+      "</html>";
+    
+    server.send(429, "text/html", html);
+    return;
+  }
   
   if(authenticateUser(username, password)) {
-    isAuthenticated = true;
-    if(isAdmin(username)) {
-      server.sendHeader("Location", "/admin");
-      server.send(302);
+    // Record successful login
+    recordLoginAttempt(clientIP, true);
+    
+    // Create session
+    bool rememberMeFlag = (rememberMe == "on");
+    int sessionIndex = createSession(username, isAdmin(username), rememberMeFlag);
+    
+    if(sessionIndex >= 0) {
+      // Set session token as cookie
+      String cookieValue = "session_token=" + sessions[sessionIndex].token + "; Path=/; HttpOnly";
+      if(rememberMeFlag) {
+        cookieValue += "; Max-Age=" + String(REMEMBER_ME_TIMEOUT / 1000);
+      } else {
+        cookieValue += "; Max-Age=" + String(SESSION_TIMEOUT / 1000);
+      }
+      server.sendHeader("Set-Cookie", cookieValue);
+      
+      // Redirect to appropriate dashboard
+      if(sessions[sessionIndex].isAdmin) {
+        server.sendHeader("Location", "/admin");
+        server.send(302);
+      } else {
+        server.sendHeader("Location", "/dashboard?user=" + username);
+        server.send(302);
+      }
     } else {
-      server.sendHeader("Location", "/dashboard?user=" + username);
-      server.send(302);
+      server.send(500, "text/html", "Lỗi tạo phiên đăng nhập");
     }
   } else {
+    // Record failed login attempt
+    recordLoginAttempt(clientIP, false);
+    
     String html = "<!DOCTYPE html>"
       "<html lang=\"vi\">"
       "<head>"
@@ -1284,41 +1862,6 @@ void handleLogin() {
       "    }"
       "  </style>"
       "</head>"
-      "<body>"
-      "  <div class=\"container\">"
-      "    <div class=\"icon-container\">"
-      "      <i class=\"fas fa-exclamation-triangle icon\"></i>"
-      "    </div>"
-      "    <h1>Đăng nhập thất bại</h1>"
-      "    <div class=\"error-message\">"
-      "      <i class=\"fas fa-info-circle\"></i> Tên đăng nhập hoặc mật khẩu không đúng."
-      "    </div>"
-      "    <p class=\"help-text\">Vui lòng kiểm tra lại thông tin đăng nhập hoặc liên hệ quản trị viên nếu bạn cần trợ giúp.</p>"
-      "    <a href=\"/\" class=\"btn btn-retry\">"
-      "      <i class=\"fas fa-redo btn-icon\"></i>Thử lại"
-      "    </a>"
-      "    <div class=\"or-divider\">"
-      "      <span>HOẶC</span>"
-      "    </div>"
-      "    <div class=\"other-options\">"
-      "      <button onclick=\"forgotPassword()\" class=\"btn\">"
-      "        <i class=\"fas fa-key btn-icon\"></i>Quên mật khẩu"
-      "      </button>"
-      "    </div>"
-      "    <div class=\"footer\">"
-      "      &copy; 2025 Hệ thống Cửa thông minh"
-      "    </div>"
-      "  </div>"
-      "  <script>"
-      "    function forgotPassword() {"
-      "      alert('Vui lòng liên hệ quản trị viên để được cấp lại mật khẩu.');"
-      "    }"
-      "    // Tự động chuyển hướng sau 10 giây"
-      "    setTimeout(function() {"
-      "      window.location.href = '/';"
-      "    }, 10000);"
-      "  </script>"
-      "</body>"
       "</html>";
     
     server.send(200, "text/html", html);
@@ -1326,8 +1869,23 @@ void handleLogin() {
 }
 
 void handleAdminPanel() {
-  if( !isAuthenticated) return;
-  isAuthenticated = false;
+  // Get session token from cookie
+  String sessionToken = getSessionTokenFromCookie();
+      sessionToken = cookies.substring(tokenStart, tokenEnd);
+    }
+  }
+  
+  // Validate session and require admin access
+  if(!requireAdminAuthentication(sessionToken)) {
+    server.sendHeader("Location", "/");
+    server.send(302);
+    return;
+  }
+  
+  // Extend session on activity
+  extendSession(sessionToken);
+  
+  Session* session = getSession(sessionToken);
   String html = "<!DOCTYPE html>"
     "<html lang=\"vi\">"
     "<head>"
@@ -1585,7 +2143,7 @@ void handleAdminPanel() {
     "      <h1><i class=\"fas fa-shield-alt\"></i> Trang quản trị hệ thống</h1>"
     "      <div class=\"header-controls\">"
     "        <button onclick=\"window.location.href='/wifi-setup'\" class=\"wifi-btn\"><i class=\"fas fa-wifi\"></i> Cấu hình WiFi</button>"
-    "        <button onclick=\"window.location.href='/'\"><i class=\"fas fa-sign-out-alt\"></i> Đăng xuất</button>"
+    "        <button onclick=\"window.location.href='/logout'\"><i class=\"fas fa-sign-out-alt\"></i> Đăng xuất</button>"
     "      </div>"
     "    </div>"
     "    <div class=\"panel\">"
@@ -1681,7 +2239,32 @@ void handleAdminPanel() {
     "  loadLogs();"
     "  setInterval(updateDoorStatus, 5000);"
     "  setInterval(loadLogs, 10000);"
+    "  setInterval(checkSessionStatus, 60000);" // Check session every minute
     "};"
+    
+    "function checkSessionStatus() {"
+    "  fetch('/api/session-info')"
+    "    .then(response => {"
+    "      if (response.status === 401) {"
+    "        showAlert('Phiên đăng nhập đã hết hạn. Đang chuyển hướng...', 'danger');"
+    "        setTimeout(() => { window.location.href = '/'; }, 2000);"
+    "        return null;"
+    "      }"
+    "      return response.json();"
+    "    })"
+    "    .then(data => {"
+    "      if (data) {"
+    "        const timeLeft = data.expiresAt - Date.now();"
+    "        if (timeLeft < 300000 && timeLeft > 0) {" // 5 minutes warning
+    "          const minutes = Math.floor(timeLeft / 60000);"
+    "          showAlert('Phiên đăng nhập sẽ hết hạn trong ' + minutes + ' phút', 'warning');"
+    "        }"
+    "      }"
+    "    })"
+    "    .catch(error => {"
+    "      console.error('Error checking session:', error);"
+    "    });"
+    "}"
     
     "function updateDoorStatus() {"
     "  fetch('/api/door-status')"
@@ -1940,9 +2523,24 @@ void handleAdminPanel() {
 }
 
 void handleUserDashboard() {
-  if(!isAuthenticated) return;
-  isAuthenticated = false;
-  String username = server.arg("user");
+  // Get session token from cookie
+  String sessionToken = getSessionTokenFromCookie();
+      sessionToken = cookies.substring(tokenStart, tokenEnd);
+    }
+  }
+  
+  // Validate session
+  if(!requireAuthentication(sessionToken)) {
+    server.sendHeader("Location", "/");
+    server.send(302);
+    return;
+  }
+  
+  // Extend session on activity
+  extendSession(sessionToken);
+  
+  Session* session = getSession(sessionToken);
+  String username = session ? session->username : server.arg("user");
   
   // Kiểm tra người dùng hợp lệ
   bool validUser = false;
@@ -2262,7 +2860,7 @@ void handleUserDashboard() {
     "      <div class='user-icon'>" + username.substring(0, 1) + "</div>"
     "      <span class='username'>" + username + "</span>"
     "    </div>"
-    "    <button onclick=\"window.location.href='/'\" class='logout-btn'>"
+    "    <button onclick=\"window.location.href='/logout'\" class='logout-btn'>"
     "      <i class='fas fa-sign-out-alt'></i> Đăng xuất"
     "    </button>"
     "  </div>"
@@ -2305,7 +2903,35 @@ void handleUserDashboard() {
     "  setInterval(updateDoorStatus, 5000);"
     "  setInterval(checkArduinoStatus, 10000);"
     "  setInterval(loadLogs, 10000);"
+    "  setInterval(checkSessionStatus, 60000);" // Check session every minute
     "};"
+    
+    "function checkSessionStatus() {"
+    "  fetch('/api/session-info')"
+    "    .then(response => {"
+    "      if (response.status === 401) {"
+    "        alert('Phiên đăng nhập đã hết hạn. Đang chuyển hướng về trang đăng nhập...');"
+    "        window.location.href = '/';"
+    "        return null;"
+    "      }"
+    "      return response.json();"
+    "    })"
+    "    .then(data => {"
+    "      if (data) {"
+    "        const timeLeft = data.expiresAt - Date.now();"
+    "        if (timeLeft < 300000 && timeLeft > 0) {" // 5 minutes warning
+    "          const minutes = Math.floor(timeLeft / 60000);"
+    "          if (confirm('Phiên đăng nhập sẽ hết hạn trong ' + minutes + ' phút. Bạn có muốn gia hạn không?')) {"
+    "            // Just make any authenticated request to extend session"
+    "            fetch('/api/door-status').catch(() => {});"
+    "          }"
+    "        }"
+    "      }"
+    "    })"
+    "    .catch(error => {"
+    "      console.error('Error checking session:', error);"
+    "    });"
+    "}"
     "    function updateDoorStatus() {"
     "      fetch('/api/door-status')"
     "        .then(response => response.json())"
@@ -2375,6 +3001,20 @@ void handleUserDashboard() {
 }
 
 void handleDoorStatus() {
+  // Get session token from cookie
+  String sessionToken = getSessionTokenFromCookie();
+      sessionToken = cookies.substring(tokenStart, tokenEnd);
+    }
+  }
+  
+  // Require authentication for door status
+  if(!requireAuthentication(sessionToken)) {
+    server.send(401, "application/json", "{\"error\":\"Authentication required\"}");
+    return;
+  }
+  
+  // Extend session on activity
+  extendSession(sessionToken);
   // Lay trang thai cua tu Arduino
   String response = sendCommandToArduino("STATUS");
   
@@ -2386,16 +3026,14 @@ void handleDoorStatus() {
   server.send(200, "application/json", json);
 }
 void handleOpenDoor() {
-  // Parse data from client
-  String user = "web_user";
-  if (server.hasArg("plain")) {
-    DynamicJsonDocument doc(200);
-    DeserializationError error = deserializeJson(doc, server.arg("plain"));
-    
-    if (!error && doc.containsKey("user")) {
-      user = doc["user"].as<String>();
-    }
-  }
+  // Get session token from cookie
+  String sessionToken = getSessionTokenFromCookie();
+  // Extend session on activity
+  extendSession(sessionToken);
+  
+  // Get user from session instead of request
+  Session* session = getSession(sessionToken);
+  String user = session ? session->username : "unknown_user";
   
   // Check Arduino connection with longer timeout
   Serial.println("Checking Arduino connection before door operation...");
@@ -2436,6 +3074,20 @@ void handleOpenDoor() {
 
 
 void handleGetUsers() {
+  // Get session token from cookie
+  String sessionToken = getSessionTokenFromCookie();
+      sessionToken = cookies.substring(tokenStart, tokenEnd);
+    }
+  }
+  
+  // Require admin authentication for user management
+  if(!requireAdminAuthentication(sessionToken)) {
+    server.send(401, "application/json", "{\"error\":\"Admin access required\"}");
+    return;
+  }
+  
+  // Extend session on activity
+  extendSession(sessionToken);
   String json = "[";
   
   for(int i = 0; i < userCount; i++) {
@@ -2449,6 +3101,20 @@ void handleGetUsers() {
 }
 
 void handleAddUser() {
+  // Get session token from cookie
+  String sessionToken = getSessionTokenFromCookie();
+      sessionToken = cookies.substring(tokenStart, tokenEnd);
+    }
+  }
+  
+  // Require admin authentication for user management
+  if(!requireAdminAuthentication(sessionToken)) {
+    server.send(401, "application/json", "{\"success\":false,\"message\":\"Admin access required\"}");
+    return;
+  }
+  
+  // Extend session on activity
+  extendSession(sessionToken);
   if(server.hasArg("plain")) {
     DynamicJsonDocument doc(512);
     DeserializationError error = deserializeJson(doc, server.arg("plain"));
@@ -2477,6 +3143,20 @@ void handleAddUser() {
 }
 
 void handleDeleteUser() {
+  // Get session token from cookie
+  String sessionToken = getSessionTokenFromCookie();
+      sessionToken = cookies.substring(tokenStart, tokenEnd);
+    }
+  }
+  
+  // Require admin authentication for user management
+  if(!requireAdminAuthentication(sessionToken)) {
+    server.send(401, "application/json", "{\"success\":false,\"message\":\"Admin access required\"}");
+    return;
+  }
+  
+  // Extend session on activity
+  extendSession(sessionToken);
   if(server.hasArg("plain")) {
     DynamicJsonDocument doc(200);
     DeserializationError error = deserializeJson(doc, server.arg("plain"));
@@ -2503,6 +3183,20 @@ void handleDeleteUser() {
 }
 
 void handleGetLogs() {
+  // Get session token from cookie
+  String sessionToken = getSessionTokenFromCookie();
+      sessionToken = cookies.substring(tokenStart, tokenEnd);
+    }
+  }
+  
+  // Require admin authentication for logs
+  if(!requireAdminAuthentication(sessionToken)) {
+    server.send(401, "application/json", "{\"error\":\"Admin access required\"}");
+    return;
+  }
+  
+  // Extend session on activity
+  extendSession(sessionToken);
   preferences.begin("doorlogs", true); // Read-only mode
   int logCount = preferences.getInt("logCount", 0);
   
@@ -3033,6 +3727,58 @@ void handleResetWiFi() {
   // Khởi động lại ESP32
   ESP.restart();
 }
+void handleLogout() {
+  // Get session token from cookie
+  String sessionToken = getSessionTokenFromCookie();
+      sessionToken = cookies.substring(tokenStart, tokenEnd);
+    }
+  }
+  
+  // Destroy session if exists
+  if(sessionToken.length() > 0) {
+    destroySession(sessionToken);
+  }
+  
+  // Clear session cookie
+  server.sendHeader("Set-Cookie", "session_token=; Path=/; HttpOnly; Max-Age=0");
+  
+  // Redirect to login page
+  server.sendHeader("Location", "/");
+  server.send(302);
+}
+
+void handleSessionInfo() {
+  // Get session token from cookie
+  String sessionToken = getSessionTokenFromCookie();
+  
+  // Require authentication
+  if(!requireAuthentication(sessionToken)) {
+    server.send(401, "application/json", "{\"error\":\"Authentication required\"}");
+    return;
+  }
+  
+  Session* session = getSession(sessionToken);
+  if(session) {
+    // Extend session on activity
+    extendSession(sessionToken);
+    
+    // Return session info
+    String json = "{";
+    json += "\"username\":\"" + session->username + "\",";
+    json += "\"isAdmin\":" + String(session->isAdmin ? "true" : "false") + ",";
+    json += "\"loginTime\":" + String(session->loginTime) + ",";
+    json += "\"lastActivity\":" + String(session->lastActivity) + ",";
+    json += "\"expiresAt\":" + String(session->expiresAt) + ",";
+    json += "\"rememberMe\":" + String(session->rememberMe ? "true" : "false") + ",";
+    json += "\"activeSessions\":" + String(getActiveSessionCount());
+    json += "}";
+    
+    server.send(200, "application/json", json);
+  } else {
+    server.send(404, "application/json", "{\"error\":\"Session not found\"}");
+  }
+}
+
 void handleArduinoStatus() {
   bool connected = checkArduinoConnection();
   String json = "{\"connected\":" + String(connected ? "true" : "false") + "}";
