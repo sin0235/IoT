@@ -136,6 +136,7 @@ void handleGetUsers();
 void handleAddUser();
 void handleDeleteUser();
 void handleGetLogs();
+void handleSessionInfo();
 void handleWiFiSetup();
 void handleWiFiScan();
 void handleSaveWiFi();
@@ -443,6 +444,54 @@ bool requireAuthentication(String token) {
 bool requireAdminAuthentication(String token) {
   Session* session = getSession(token);
   return (session != nullptr && session->isAdmin);
+}
+
+// Additional session management helper functions
+void clearAllSessions() {
+  for(int i = 0; i < MAX_SESSIONS; i++) {
+    if(sessions[i].active) {
+      destroySession(sessions[i].token);
+    }
+  }
+  Serial.println("All sessions cleared");
+}
+
+int getActiveSessionCount() {
+  int count = 0;
+  cleanupExpiredSessions(); // Clean up first
+  for(int i = 0; i < MAX_SESSIONS; i++) {
+    if(sessions[i].active) {
+      count++;
+    }
+  }
+  return count;
+}
+
+String getSessionInfo(String token) {
+  Session* session = getSession(token);
+  if(session) {
+    return "User: " + session->username + 
+           ", Admin: " + (session->isAdmin ? "Yes" : "No") +
+           ", Remember: " + (session->rememberMe ? "Yes" : "No") +
+           ", Expires: " + String(session->expiresAt);
+  }
+  return "Session not found";
+}
+
+// Helper function to extract session token from cookies
+String getSessionTokenFromCookie() {
+  String sessionToken = "";
+  if(server.hasHeader("Cookie")) {
+    String cookies = server.header("Cookie");
+    int tokenStart = cookies.indexOf("session_token=");
+    if(tokenStart != -1) {
+      tokenStart += 14;
+      int tokenEnd = cookies.indexOf(";", tokenStart);
+      if(tokenEnd == -1) tokenEnd = cookies.length();
+      sessionToken = cookies.substring(tokenStart, tokenEnd);
+    }
+  }
+  return sessionToken;
 }
 
 // ===== KHOI TAO HE THONG =====
@@ -1032,6 +1081,7 @@ void setupServerRoutes() {
   server.on("/api/add-user", HTTP_POST, handleAddUser);
   server.on("/api/delete-user", HTTP_POST, handleDeleteUser);
   server.on("/api/logs", HTTP_GET, handleGetLogs);
+  server.on("/api/session-info", HTTP_GET, handleSessionInfo);
   
   // 404 Not Found
   server.onNotFound([]() {
@@ -1820,14 +1870,7 @@ void handleLogin() {
 
 void handleAdminPanel() {
   // Get session token from cookie
-  String sessionToken = "";
-  if(server.hasHeader("Cookie")) {
-    String cookies = server.header("Cookie");
-    int tokenStart = cookies.indexOf("session_token=");
-    if(tokenStart != -1) {
-      tokenStart += 14;
-      int tokenEnd = cookies.indexOf(";", tokenStart);
-      if(tokenEnd == -1) tokenEnd = cookies.length();
+  String sessionToken = getSessionTokenFromCookie();
       sessionToken = cookies.substring(tokenStart, tokenEnd);
     }
   }
@@ -2196,7 +2239,32 @@ void handleAdminPanel() {
     "  loadLogs();"
     "  setInterval(updateDoorStatus, 5000);"
     "  setInterval(loadLogs, 10000);"
+    "  setInterval(checkSessionStatus, 60000);" // Check session every minute
     "};"
+    
+    "function checkSessionStatus() {"
+    "  fetch('/api/session-info')"
+    "    .then(response => {"
+    "      if (response.status === 401) {"
+    "        showAlert('Phiên đăng nhập đã hết hạn. Đang chuyển hướng...', 'danger');"
+    "        setTimeout(() => { window.location.href = '/'; }, 2000);"
+    "        return null;"
+    "      }"
+    "      return response.json();"
+    "    })"
+    "    .then(data => {"
+    "      if (data) {"
+    "        const timeLeft = data.expiresAt - Date.now();"
+    "        if (timeLeft < 300000 && timeLeft > 0) {" // 5 minutes warning
+    "          const minutes = Math.floor(timeLeft / 60000);"
+    "          showAlert('Phiên đăng nhập sẽ hết hạn trong ' + minutes + ' phút', 'warning');"
+    "        }"
+    "      }"
+    "    })"
+    "    .catch(error => {"
+    "      console.error('Error checking session:', error);"
+    "    });"
+    "}"
     
     "function updateDoorStatus() {"
     "  fetch('/api/door-status')"
@@ -2456,14 +2524,7 @@ void handleAdminPanel() {
 
 void handleUserDashboard() {
   // Get session token from cookie
-  String sessionToken = "";
-  if(server.hasHeader("Cookie")) {
-    String cookies = server.header("Cookie");
-    int tokenStart = cookies.indexOf("session_token=");
-    if(tokenStart != -1) {
-      tokenStart += 14;
-      int tokenEnd = cookies.indexOf(";", tokenStart);
-      if(tokenEnd == -1) tokenEnd = cookies.length();
+  String sessionToken = getSessionTokenFromCookie();
       sessionToken = cookies.substring(tokenStart, tokenEnd);
     }
   }
@@ -2842,7 +2903,35 @@ void handleUserDashboard() {
     "  setInterval(updateDoorStatus, 5000);"
     "  setInterval(checkArduinoStatus, 10000);"
     "  setInterval(loadLogs, 10000);"
+    "  setInterval(checkSessionStatus, 60000);" // Check session every minute
     "};"
+    
+    "function checkSessionStatus() {"
+    "  fetch('/api/session-info')"
+    "    .then(response => {"
+    "      if (response.status === 401) {"
+    "        alert('Phiên đăng nhập đã hết hạn. Đang chuyển hướng về trang đăng nhập...');"
+    "        window.location.href = '/';"
+    "        return null;"
+    "      }"
+    "      return response.json();"
+    "    })"
+    "    .then(data => {"
+    "      if (data) {"
+    "        const timeLeft = data.expiresAt - Date.now();"
+    "        if (timeLeft < 300000 && timeLeft > 0) {" // 5 minutes warning
+    "          const minutes = Math.floor(timeLeft / 60000);"
+    "          if (confirm('Phiên đăng nhập sẽ hết hạn trong ' + minutes + ' phút. Bạn có muốn gia hạn không?')) {"
+    "            // Just make any authenticated request to extend session"
+    "            fetch('/api/door-status').catch(() => {});"
+    "          }"
+    "        }"
+    "      }"
+    "    })"
+    "    .catch(error => {"
+    "      console.error('Error checking session:', error);"
+    "    });"
+    "}"
     "    function updateDoorStatus() {"
     "      fetch('/api/door-status')"
     "        .then(response => response.json())"
@@ -2913,14 +3002,7 @@ void handleUserDashboard() {
 
 void handleDoorStatus() {
   // Get session token from cookie
-  String sessionToken = "";
-  if(server.hasHeader("Cookie")) {
-    String cookies = server.header("Cookie");
-    int tokenStart = cookies.indexOf("session_token=");
-    if(tokenStart != -1) {
-      tokenStart += 14;
-      int tokenEnd = cookies.indexOf(";", tokenStart);
-      if(tokenEnd == -1) tokenEnd = cookies.length();
+  String sessionToken = getSessionTokenFromCookie();
       sessionToken = cookies.substring(tokenStart, tokenEnd);
     }
   }
@@ -2945,24 +3027,7 @@ void handleDoorStatus() {
 }
 void handleOpenDoor() {
   // Get session token from cookie
-  String sessionToken = "";
-  if(server.hasHeader("Cookie")) {
-    String cookies = server.header("Cookie");
-    int tokenStart = cookies.indexOf("session_token=");
-    if(tokenStart != -1) {
-      tokenStart += 14;
-      int tokenEnd = cookies.indexOf(";", tokenStart);
-      if(tokenEnd == -1) tokenEnd = cookies.length();
-      sessionToken = cookies.substring(tokenStart, tokenEnd);
-    }
-  }
-  
-  // Validate session
-  if(!requireAuthentication(sessionToken)) {
-    server.send(401, "application/json", "{\"success\":false,\"message\":\"Authentication required\"}");
-    return;
-  }
-  
+  String sessionToken = getSessionTokenFromCookie();
   // Extend session on activity
   extendSession(sessionToken);
   
@@ -3010,14 +3075,7 @@ void handleOpenDoor() {
 
 void handleGetUsers() {
   // Get session token from cookie
-  String sessionToken = "";
-  if(server.hasHeader("Cookie")) {
-    String cookies = server.header("Cookie");
-    int tokenStart = cookies.indexOf("session_token=");
-    if(tokenStart != -1) {
-      tokenStart += 14;
-      int tokenEnd = cookies.indexOf(";", tokenStart);
-      if(tokenEnd == -1) tokenEnd = cookies.length();
+  String sessionToken = getSessionTokenFromCookie();
       sessionToken = cookies.substring(tokenStart, tokenEnd);
     }
   }
@@ -3044,14 +3102,7 @@ void handleGetUsers() {
 
 void handleAddUser() {
   // Get session token from cookie
-  String sessionToken = "";
-  if(server.hasHeader("Cookie")) {
-    String cookies = server.header("Cookie");
-    int tokenStart = cookies.indexOf("session_token=");
-    if(tokenStart != -1) {
-      tokenStart += 14;
-      int tokenEnd = cookies.indexOf(";", tokenStart);
-      if(tokenEnd == -1) tokenEnd = cookies.length();
+  String sessionToken = getSessionTokenFromCookie();
       sessionToken = cookies.substring(tokenStart, tokenEnd);
     }
   }
@@ -3093,14 +3144,7 @@ void handleAddUser() {
 
 void handleDeleteUser() {
   // Get session token from cookie
-  String sessionToken = "";
-  if(server.hasHeader("Cookie")) {
-    String cookies = server.header("Cookie");
-    int tokenStart = cookies.indexOf("session_token=");
-    if(tokenStart != -1) {
-      tokenStart += 14;
-      int tokenEnd = cookies.indexOf(";", tokenStart);
-      if(tokenEnd == -1) tokenEnd = cookies.length();
+  String sessionToken = getSessionTokenFromCookie();
       sessionToken = cookies.substring(tokenStart, tokenEnd);
     }
   }
@@ -3140,14 +3184,7 @@ void handleDeleteUser() {
 
 void handleGetLogs() {
   // Get session token from cookie
-  String sessionToken = "";
-  if(server.hasHeader("Cookie")) {
-    String cookies = server.header("Cookie");
-    int tokenStart = cookies.indexOf("session_token=");
-    if(tokenStart != -1) {
-      tokenStart += 14;
-      int tokenEnd = cookies.indexOf(";", tokenStart);
-      if(tokenEnd == -1) tokenEnd = cookies.length();
+  String sessionToken = getSessionTokenFromCookie();
       sessionToken = cookies.substring(tokenStart, tokenEnd);
     }
   }
@@ -3692,14 +3729,7 @@ void handleResetWiFi() {
 }
 void handleLogout() {
   // Get session token from cookie
-  String sessionToken = "";
-  if(server.hasHeader("Cookie")) {
-    String cookies = server.header("Cookie");
-    int tokenStart = cookies.indexOf("session_token=");
-    if(tokenStart != -1) {
-      tokenStart += 14;
-      int tokenEnd = cookies.indexOf(";", tokenStart);
-      if(tokenEnd == -1) tokenEnd = cookies.length();
+  String sessionToken = getSessionTokenFromCookie();
       sessionToken = cookies.substring(tokenStart, tokenEnd);
     }
   }
@@ -3715,6 +3745,38 @@ void handleLogout() {
   // Redirect to login page
   server.sendHeader("Location", "/");
   server.send(302);
+}
+
+void handleSessionInfo() {
+  // Get session token from cookie
+  String sessionToken = getSessionTokenFromCookie();
+  
+  // Require authentication
+  if(!requireAuthentication(sessionToken)) {
+    server.send(401, "application/json", "{\"error\":\"Authentication required\"}");
+    return;
+  }
+  
+  Session* session = getSession(sessionToken);
+  if(session) {
+    // Extend session on activity
+    extendSession(sessionToken);
+    
+    // Return session info
+    String json = "{";
+    json += "\"username\":\"" + session->username + "\",";
+    json += "\"isAdmin\":" + String(session->isAdmin ? "true" : "false") + ",";
+    json += "\"loginTime\":" + String(session->loginTime) + ",";
+    json += "\"lastActivity\":" + String(session->lastActivity) + ",";
+    json += "\"expiresAt\":" + String(session->expiresAt) + ",";
+    json += "\"rememberMe\":" + String(session->rememberMe ? "true" : "false") + ",";
+    json += "\"activeSessions\":" + String(getActiveSessionCount());
+    json += "}";
+    
+    server.send(200, "application/json", json);
+  } else {
+    server.send(404, "application/json", "{\"error\":\"Session not found\"}");
+  }
 }
 
 void handleArduinoStatus() {
